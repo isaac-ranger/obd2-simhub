@@ -137,8 +137,12 @@ class Elm:
         return lines
 
 
-def parse_mode01(lines):
+def parse_mode01(lines, merge_or=frozenset()):
     """Parse ELM output lines for a Mode 01 request into ({pid: bytes}, responders).
+
+    PIDs listed in merge_or are OR-combined across responding ECUs instead of
+    first-responder-wins — used for the supported-PID bitmaps, where a PID
+    exposed only by a second ECU should still count.
 
     Handles: single-frame ('410C1AF8'), multi-frame ISO-TP ('00D' length
     header then '0:...'/'1:...' continuation lines), spaces on or off,
@@ -146,14 +150,15 @@ def parse_mode01(lines):
     wins per PID), and the ELM error vocabulary.
     """
     status_errors = {"NO DATA", "STOPPED", "CAN ERROR", "BUS ERROR",
-                     "UNABLE TO CONNECT", "DATA ERROR", "BUFFER FULL",
-                     "FB ERROR", "ACT ALERT", "ERR"}
+                     "UNABLE TO CONNECT", "DATA ERROR", "RX ERROR",
+                     "BUFFER FULL", "FB ERROR", "ACT ALERT", "ERR"}
     cleaned = []
     for line in lines:
         u = line.upper().replace(" ", "")
         if line.strip() == "?":
             raise ElmError("command rejected ('?') — not supported by adapter")
-        if any(u.startswith(e.replace(" ", "")) for e in status_errors):
+        # Real ELMs prefix some errors with '<' (e.g. '<DATA ERROR', '<RX ERROR')
+        if any(u.lstrip("<").startswith(e.replace(" ", "")) for e in status_errors):
             raise ElmError(line.strip())
         cleaned.append(u)
 
@@ -194,18 +199,28 @@ def parse_mode01(lines):
             n = PID_LEN.get(pid)
             if n is None or i + 1 + n > len(data):
                 break  # unknown PID length or truncated — stop walking safely
-            results.setdefault(pid, data[i + 1: i + 1 + n])
+            chunk = data[i + 1: i + 1 + n]
+            if pid in merge_or and pid in results and len(results[pid]) == n:
+                results[pid] = bytes(a | b for a, b in zip(results[pid], chunk))
+            else:
+                results.setdefault(pid, chunk)
             i += 1 + n
     if not results:
         raise ElmError(f"no parseable Mode 01 payload in {lines!r}")
     return results, responders
 
 
-def query_pids(elm, pids, timeout=None):
-    """Request one or more Mode 01 PIDs in a single message."""
+def query_pids(elm, pids, timeout=None, merge_or=frozenset()):
+    """Request one or more Mode 01 PIDs in a single message.
+
+    Note for phase 2: appending the expected-response-count digit to the
+    request (e.g. '010C 1') lets the ELM return without waiting out its
+    response timer, raising real-hardware rates further than measured here.
+    The probe deliberately omits it, so its numbers are a floor.
+    """
     req = "01" + "".join(f"{p:02X}" for p in pids)
     lines = elm.cmd(req, timeout=timeout)
-    return parse_mode01(lines)
+    return parse_mode01(lines, merge_or=merge_or)
 
 
 def get_supported_pids(elm):
@@ -214,7 +229,7 @@ def get_supported_pids(elm):
     base = 0x00
     while base <= 0xC0:
         try:
-            res, _ = query_pids(elm, [base])
+            res, _ = query_pids(elm, [base], merge_or={base})
         except ElmError:
             break
         bits = res.get(base)
@@ -281,11 +296,11 @@ def run_probe(elm, report, args):
         print(f"  FAILED: {e}")
         print("  Is the ignition on / engine running? Is the adapter plugged in?")
         report["vehicle_contact"] = f"failed: {e}"
-        return
+        return False
     report["vehicle_contact"] = "ok"
     report["responders"] = responders
 
-    dpn = "".join(elm.cmd("ATDPN")).lstrip("A")  # 'A6' -> auto-detected 6
+    dpn = "".join(elm.cmd("ATDPN")).removeprefix("A")  # 'A6' -> auto-detected 6
     proto = PROTOCOL_NAMES.get(dpn, f"unknown (ATDPN={dpn!r})")
     is_can = dpn in ("6", "7", "8", "9")
     report["protocol"] = proto
@@ -325,10 +340,15 @@ def run_probe(elm, report, args):
     rates = {}
     best_updates = 0.0  # channel-updates per second, the number that matters
 
-    hz, n, _ = rate_test(elm, [0x0C], args.seconds)
-    rates["single_pid_hz"] = round(hz, 1)
-    best_updates = max(best_updates, hz)
-    print(f"  1 PID  (RPM only)         : {hz:5.1f} requests/s  ({n} samples)")
+    try:
+        hz, n, _ = rate_test(elm, [0x0C], args.seconds)
+        rates["single_pid_hz"] = round(hz, 1)
+        best_updates = max(best_updates, hz)
+        print(f"  1 PID  (RPM only)         : {hz:5.1f} requests/s  ({n} samples)")
+    except ElmError as e:
+        rates["single_pid_hz"] = f"failed: {e}"
+        print(f"  1 PID  (RPM only)         : failed mid-test ({e}) — adapter hiccup;"
+              f" rerun if this repeats")
 
     if is_can:
         batches = []
@@ -369,6 +389,7 @@ def run_probe(elm, report, args):
             print("  (Pre-CAN protocol is the limiter — this is expected on older cars.)")
     print("  Send this report back (use --json) and phase 2, the SimHub feed,")
     print("  gets built around what your car actually delivers.")
+    return True
 
 
 def main():
@@ -405,8 +426,14 @@ def main():
               "another dashboard tool) is holding the port.")
         return 1
 
+    probe_ok = False
     try:
-        run_probe(elm, report, args)
+        probe_ok = bool(run_probe(elm, report, args))
+    except (ElmError, serial.SerialException, OSError) as e:
+        # Mid-run Bluetooth drops and adapter naps land here, not in a traceback.
+        print(f"\nAborted mid-run: {e}")
+        print("Power-cycle the adapter (unplug/replug), re-pair if needed, and rerun.")
+        report["aborted"] = str(e)
     finally:
         if args.debug:
             print("\n--- raw traffic log ---")
@@ -417,7 +444,7 @@ def main():
                 json.dump(report, f, indent=2)
             print(f"\nJSON report written to {args.json}")
         elm.close()
-    return 0
+    return 0 if probe_ok else 1
 
 
 if __name__ == "__main__":

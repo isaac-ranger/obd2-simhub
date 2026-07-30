@@ -34,21 +34,25 @@ Guessing those makes a bad bridge; measuring them takes five minutes.
 
 ## Phase 1 — run the probe (Windows)
 
-1. Install Python 3.9+ from [python.org](https://www.python.org/downloads/)
+1. Get the code: **Code → Download ZIP** on this page and extract it (or
+   `git clone https://github.com/isaac-ranger/obd2-simhub`), then open a
+   terminal in the extracted folder.
+2. Install Python 3.9+ from [python.org](https://www.python.org/downloads/)
    (check "Add python.exe to PATH"), then:
    ```
    pip install pyserial
    ```
-2. Plug the OBDLink MX+ into the OBD2 port. Pair it in Windows Bluetooth
+3. Plug the OBDLink MX+ into the OBD2 port. Pair it in Windows Bluetooth
    settings (press the **Connect** button on the MX+ to make it discoverable).
-3. Find the COM port — pairing creates **two**; you want the **outgoing** one
-   (Bluetooth settings → *More Bluetooth options* → *COM Ports*), or run:
+4. Find the COM port — pairing creates **two**; you want the **outgoing** one
+   (Bluetooth settings → *More Bluetooth settings* on Win 11, *...options* on
+   Win 10 → *COM Ports*), or run:
    ```
-   py obd_probe.py --list-ports
+   py probe\obd_probe.py --list-ports
    ```
-4. Engine running (not just ignition — some PIDs sleep otherwise), then:
+5. Engine running (not just ignition — some PIDs sleep otherwise), then:
    ```
-   py obd_probe.py --port COM5 --json report.json
+   py probe\obd_probe.py --port COM5 --json report.json
    ```
 
 The probe is **read-only**: Mode 01 data requests and ELM configuration only.
@@ -68,9 +72,10 @@ Built after phase 1 numbers are in:
   the car sustains; slow tier (coolant, intake temp, fuel level, voltage)
   refreshed every few seconds. OBD2 is request/response — bandwidth is spent
   where the needles move.
-- **Decoupled UDP send.** The feed to SimHub runs at a fixed rate (e.g. 60 Hz)
-  sending last-known values, so SimHub's rendering never stutters on OBD
-  latency; optional light interpolation on RPM/speed.
+- **Decoupled UDP send.** The feed to SimHub runs at a fixed rate at or above
+  SimHub's stated 60 Hz minimum, sending last-known values, so SimHub's
+  rendering never stutters on OBD latency; optional light interpolation on
+  RPM/speed.
 - **`.simdef` contract** authored in SimHub's built-in definition editor
   (Settings → enable *game definition authoring tools*), fields matching what
   the car actually provides. SimHub generates the exact C# packet struct
@@ -106,16 +111,24 @@ python probe/obd_probe.py --port socket://127.0.0.1:35000   # terminal 2
 ```
 
 `serial_for_url` gives one code path for real COM ports and `socket://` test
-targets. The parser has fixture tests for single-frame, batched, ISO-TP
-multi-frame, spaced/unspaced, and multi-ECU responses.
+targets. The parser's adversarial fixture tests (48 cases: single-frame,
+batched, ISO-TP multi-frame, spaced/unspaced/lowercase, multi-ECU, negative
+responses, the full ELM error vocabulary, truncation) live in
+[`probe/test_parse.py`](probe/test_parse.py):
+
+```
+python probe/test_parse.py
+```
 
 ## A note on "OBDwiz on GitHub"
 
-The only official source for OBDLink's **OBDwiz** software is
-[obdlink.com](https://www.obdlink.com/) (OCTech). OBDwiz is **not open
-source** and has **no official GitHub repository** — repos offering OBDwiz
-downloads (typically a README with a Dropbox/password-protected archive) are
-malware lures. Don't run them.
+OBDLink's **OBDwiz** software is closed-source. Official downloads come only
+from the vendor sites — [obdlink.com](https://www.obdlink.com/) /
+scantool.net (OBD Solutions) or the developer's
+[obdsoftware.net](https://www.obdsoftware.net/) (OCTech). It has **no
+official GitHub repository** — repos offering OBDwiz downloads (typically a
+README with a Dropbox/password-protected archive) are malware lures. Don't
+run them.
 
 ## License
 
