@@ -83,6 +83,41 @@ Built after phase 1 numbers are in:
 - **Derived channels** where OBD2 has gaps: gear ≈ f(RPM, speed, final-drive
   ratios), for example.
 
+### Phase 2 research notes (2026-07-30)
+
+Findings that shape the design, banked here so they survive:
+
+- **On a 982 (718 Cayman/Boxster), the OBD port's CAN pins are
+  gateway-isolated** — essentially no broadcast data reaches them. Standard
+  Mode 01 polling (this project's phase 1/2) works fine through the gateway;
+  *chassis* channels (brake pressure, steering angle, wheel speeds) do not
+  casually leak through. Plan accordingly.
+- **A community DBC for the 982's internal CAN DRIVE bus exists:**
+  [planetkris.com](https://planetkris.com/unlocking-the-porsche-718-can-bus/)
+  reverse-engineered it (~40 hours): steering angle/speed, brake pressure,
+  yaw rate, lateral/longitudinal G from the car's own ESP sensors, all four
+  wheel speeds, clutch pedal, oil data. Requires a physical harness tap
+  behind the gateway — a real decision on a warranty car, so it's an
+  *optional future input*, not the plan. The extractor's `.simdef` will
+  reserve fields for these channels so a tap (or any CAN source) can slot in
+  without a contract change.
+  (Investigative aside: planetkris is a Cayman-driving, CAN-dissecting
+  tinkerer named Kris. This project's instigator is a Cayman-driving,
+  debug-log-wielding tinkerer named Kris who bills himself "Vehicle
+  Specialist / Mad Scientist." We are assured these are different people.
+  The file remains open.)
+- **No-splice motion data: RaceBox Mini** (~25 Hz GPS + IMU, documented BLE
+  protocol, open-source client implementations exist). The right way to get
+  a G-ball and real speed traces on a warranty car; the extractor can merge
+  it into the same UDP feed. (Unrelated to "RaceBox SimRacing" button
+  boxes — naming collision.)
+- **SoloStorm** (Android) is the autocross community's established
+  logger/analysis app (GPS + OBD + video + predictive timing). Complementary
+  lane: SoloStorm for post-run analysis, this bridge for the live stream
+  overlay.
+- Extractor will log every run to CSV as a side effect — free data for
+  later analysis, season stats, and co-hosts who enjoy quoting numbers.
+
 ### What standard OBD2 can and can't give you
 
 Available on nearly every 2008+ car (CAN): RPM, speed, throttle %, engine
