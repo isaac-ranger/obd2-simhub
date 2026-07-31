@@ -54,6 +54,10 @@ Guessing those makes a bad bridge; measuring them takes five minutes.
    ```
    py probe\obd_probe.py --port COM5 --json report.json
    ```
+   For a gear-ratio learning drive instead (phase 2 prep):
+   ```
+   py probe\obd_probe.py --port COM5 --log drive.csv
+   ```
 
 The probe is **read-only**: Mode 01 data requests and ELM configuration only.
 It never writes to the ECU and never touches trouble codes.
@@ -153,10 +157,16 @@ Design below is now settled against the measured numbers above:
     RPM ÷ speed is meaningless, and snap-to-nearest would flicker the readout
     through the whole H-pattern on every shift. Rule: a ratio not near one of
     the six learned clusters reads *neutral/shifting*, never a gear.
-  - **Blocking input: a drive log, which the phase 1 probe cannot produce** — it
-    measures and reports, with no logging mode. Next build is `--log`, RPM +
-    speed at 5 Hz to CSV; then one ordinary drive settling briefly in each of
-    the six gears yields the ratio set.
+  - **The drive log is built: `--log` (2026-07-31).**
+    ```
+    py probe\obd_probe.py --port COM5 --log drive.csv
+    ```
+    Skips the survey, polls RPM + speed + throttle in one batched request at
+    the car's measured rate, one CSV row per sample (`t_s,rpm,speed_kmh,
+    throttle_pct`), every row flushed as written so a laptop dying mid-drive
+    keeps everything up to its last sample. Ctrl-C ends it cleanly; transient
+    hiccups are skipped rather than fatal. One ordinary drive settling briefly
+    in each of the six gears yields the ratio set.
 
 ### Phase 2 research notes (2026-07-30)
 
@@ -245,7 +255,7 @@ getting the *request rate* right, which is the opposite of the usual
 emulator-is-faster-than-hardware bias. Don't tune the poll schedule against it.
 
 `serial_for_url` gives one code path for real COM ports and `socket://` test
-targets. The parser's adversarial fixture tests (48 cases: single-frame,
+targets. The parser's adversarial fixture tests (51 cases: single-frame,
 batched, ISO-TP multi-frame, spaced/unspaced/lowercase, multi-ECU, negative
 responses, the ELM error strings the parser knows, truncation) live in
 [`probe/test_parse.py`](probe/test_parse.py):

@@ -1,7 +1,7 @@
 """Adversarial fixture tests for parse_mode01. Run: python probe/test_parse.py"""
 import sys
 import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from obd_probe import parse_mode01, ElmError, DASH_PIDS
+from obd_probe import parse_mode01, ElmError, DASH_PIDS, csv_cell
 
 FAILED = []
 
@@ -123,6 +123,13 @@ for pid, data, want in checks:
     name, unit, fn = DASH_PIDS[pid]
     got = fn(data)
     ok(f"decoder {pid:02X} {name}", abs(got - want) < 1e-9, f"got {got}, want {want}")
+
+# --- drive-log CSV cells ---
+row = {0x0C: b"\x1a\xf8", 0x0D: b"\x40"}
+ok("csv_cell decodes", csv_cell(0x0C, row) == "1726.0" and csv_cell(0x0D, row) == "64.0",
+   f"got {csv_cell(0x0C, row)!r}, {csv_cell(0x0D, row)!r}")
+ok("csv_cell missing PID is empty, not fabricated", csv_cell(0x11, row) == "")
+ok("csv_cell decode error is empty, not a crash", csv_cell(0x0C, {0x0C: b""}) == "")
 
 print()
 print(f"{'ALL PASS' if not FAILED else 'FAILURES: ' + ', '.join(FAILED)}  "

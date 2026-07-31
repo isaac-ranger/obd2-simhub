@@ -273,14 +273,95 @@ def fmt_values(byte_map):
     return out
 
 
-def run_probe(elm, report, args):
-    # --- reset + identify ----------------------------------------------------
+def adapter_init(elm):
+    """Reset the adapter and apply the standard setup; return its ident."""
     ident = " / ".join(elm.cmd("ATZ", timeout=12.0)) or "(no reply)"
-    print(f"Adapter reset:     {ident}")
-    report["adapter"] = ident
-
     for setup in ("ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"):
         elm.cmd(setup)
+    return ident
+
+
+# Drive-log mode: RPM + speed are the ratio; throttle rides in the same
+# batched request for free and marks lifts/shifts in the data.
+LOG_PIDS = [0x0C, 0x0D, 0x11]
+LOG_COLUMNS = {0x0C: "rpm", 0x0D: "speed_kmh", 0x11: "throttle_pct"}
+
+
+def csv_cell(pid, byte_map):
+    """Decode one PID into a CSV cell; empty when the sample lacks it."""
+    data = byte_map.get(pid)
+    if data is None:
+        return ""
+    _name, _unit, fn = DASH_PIDS[pid]
+    try:
+        return f"{fn(data):.1f}"
+    except Exception:
+        return ""
+
+
+def log_drive(elm, path, pids=LOG_PIDS):
+    """Poll `pids` in one batched request per sample, one CSV row per sample,
+    each row flushed as written — a laptop that dies mid-drive keeps every
+    sample up to its last. Ctrl-C ends the log cleanly."""
+    cols = [LOG_COLUMNS.get(p, f"pid_{p:02X}") for p in pids]
+    n = 0
+    misses = 0
+    t0 = time.perf_counter()
+    print(f"Drive log -> {path}   (Ctrl-C to stop)")
+    with open(path, "w", encoding="ascii", newline="") as out:
+        out.write("t_s," + ",".join(cols) + "\n")
+        try:
+            while True:
+                try:
+                    res, _ = query_pids(elm, pids, timeout=3.0)
+                except ElmError:
+                    # A red-light idle hiccup or slow ECU moment is not a
+                    # reason to lose the drive; give up only when it looks
+                    # permanent.
+                    misses += 1
+                    if misses >= 25:
+                        print(f"\n{misses} consecutive failed samples — "
+                              f"giving up. Log kept: {path}")
+                        break
+                    continue
+                misses = 0
+                t = time.perf_counter() - t0
+                out.write(f"{t:.3f},"
+                          + ",".join(csv_cell(p, res) for p in pids) + "\n")
+                out.flush()
+                n += 1
+                if n % 50 == 0:
+                    rpm = csv_cell(0x0C, res) or "?"
+                    kmh = csv_cell(0x0D, res) or "?"
+                    print(f"  {n:5d} samples  {t:6.0f} s   "
+                          f"RPM {rpm}   speed {kmh} km/h")
+        except KeyboardInterrupt:
+            pass
+    dur = time.perf_counter() - t0
+    print(f"\nDrive log done: {n} samples in {dur:.0f} s -> {path}")
+    return n
+
+
+def log_mode(elm, report, args):
+    """--log entry: skip the survey, contact the car, log until Ctrl-C."""
+    ident = adapter_init(elm)
+    report["adapter"] = ident
+    print(f"Adapter reset:     {ident}")
+    print("\nContacting vehicle (0100 supported-PID request)...")
+    try:
+        query_pids(elm, [0x00], timeout=15.0)
+    except ElmError as e:
+        print(f"  FAILED: {e}")
+        print("  Is the ignition on / engine running? Is the adapter plugged in?")
+        return False
+    return log_drive(elm, args.log) > 0
+
+
+def run_probe(elm, report, args):
+    # --- reset + identify ----------------------------------------------------
+    ident = adapter_init(elm)
+    print(f"Adapter reset:     {ident}")
+    report["adapter"] = ident
 
     sti = elm.cmd("STI")
     stn = bool(sti) and not any(l.strip() == "?" for l in sti)
@@ -410,6 +491,9 @@ def main():
     ap.add_argument("--baud", type=int, default=115200, help="baud rate (ignored by Bluetooth SPP)")
     ap.add_argument("--seconds", type=float, default=5.0, help="duration of each rate test")
     ap.add_argument("--json", metavar="FILE", help="also write machine-readable results")
+    ap.add_argument("--log", metavar="FILE.csv",
+                    help="drive-log mode: skip the survey, poll RPM/speed/"
+                         "throttle to CSV until Ctrl-C (for gear-ratio learning)")
     ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     ap.add_argument("--debug", action="store_true", help="dump raw traffic at the end")
     args = ap.parse_args()
@@ -443,7 +527,10 @@ def main():
 
     probe_ok = False
     try:
-        probe_ok = bool(run_probe(elm, report, args))
+        if args.log:
+            probe_ok = log_mode(elm, report, args)
+        else:
+            probe_ok = bool(run_probe(elm, report, args))
     except (ElmError, serial.SerialException, OSError) as e:
         # Mid-run Bluetooth drops and adapter naps land here, not in a traceback.
         print(f"\nAborted mid-run: {e}")
