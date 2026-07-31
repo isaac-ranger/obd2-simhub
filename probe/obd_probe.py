@@ -36,7 +36,10 @@ try:
     import serial  # pyserial
     from serial.tools import list_ports
 except ImportError:
-    sys.exit("pyserial is required:  pip install pyserial")
+    # Parser-only imports (test_parse.py) work without pyserial; anything
+    # that touches a port is gated in main().
+    serial = None
+    list_ports = None
 
 PROMPT = b">"
 
@@ -410,6 +413,9 @@ def main():
     ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     ap.add_argument("--debug", action="store_true", help="dump raw traffic at the end")
     args = ap.parse_args()
+
+    if serial is None:
+        sys.exit("pyserial is required:  pip install pyserial")
 
     if args.list_ports:
         ports = list(list_ports.comports())

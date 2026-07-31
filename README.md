@@ -99,10 +99,16 @@ one message). Design accordingly, and treat rate guesses for other cars with
 matching suspicion.
 
 **5.0 Hz is a floor, and there is a known lever.** The probe deliberately omits
-the ELM327 expected-response-count digit (`010C0D11… 6`), which lets the adapter
-return as soon as it has the frames it was promised instead of waiting out its
-response timer. That is the first optimization phase 2 gets, and it is the one
-most likely to move the number.
+the ELM327 expected-response-count digit (e.g. `010C0D11… 1`), which lets the
+adapter return as soon as it has what it was told to expect instead of waiting
+out its response timer. Getting the digit right is itself an experiment: the
+datasheet counts *responses*, and one ECU answering a 6-PID batch sends one
+message — but that message spans three CAN frames, and if the chip counts
+received lines the right digit is `3`, not `1`. (A too-large digit is a no-op —
+the timer runs out exactly as with no digit; the datasheet warns a too-small
+one can cut off the transfer.) Phase 2 tries `1` and `3`, verifies the reply is
+complete, and keeps whichever moves the number. It is the first optimization
+phase 2 gets, and the one most likely to move 5.0 Hz upward.
 
 ## Phase 2 — the extractor (design)
 
@@ -117,8 +123,8 @@ Design below is now settled against the measured numbers above:
   The arithmetic on the measured 5.0 Hz: fast channels land the **full 5 Hz**,
   and seven slow channels through three rotating slots refresh every ⌈7/3⌉ = 3
   requests ≈ **0.6 s** — comfortably fresh for temperatures and fuel level.
-  Naive round-robin over all ten channels would instead give RPM 1.5 Hz. The
-  batching structure *is* the tiering.
+  Naive round-robin over all ten channels would instead give RPM 3.0 Hz
+  (6 slots × 5 Hz ÷ 10 channels). The batching structure *is* the tiering.
 - **Decoupled UDP send — now load-bearing, not optional.** With the car
   delivering RPM at 5 Hz and SimHub wanting ≥60 Hz, the send loop is what stands
   between the measurement and a visibly stepping tach. It runs at a fixed 60 Hz
@@ -134,8 +140,11 @@ Design below is now settled against the measured numbers above:
   from the RPM ÷ speed ratio snapped to the nearest known ratio. **Gearbox
   confirmed by the owner 2026-07-30: 6-speed manual** (the 982 GTS 4.0 also
   ships as a 7-speed PDK; this one is not that). The manual is the favourable
-  case — fixed ratios, no torque converter, so the ratio is arithmetic rather
-  than a fight with converter slip near a stop.
+  case: with the clutch out the driveline is locked, so the ratio is clean
+  arithmetic. (A PDK's ratios are just as fixed — it is a dual-clutch box, no
+  torque converter — but it creeps and launches on a slipping clutch under its
+  own control, so its low-speed ratio data is garbage in a way a driver-operated
+  clutch pedal at least announces.)
   - **Learn the ratios, don't table them.** Published ratios drift against tire
     wear and are simply wrong after a wheel/tire change. A drive log's ratio
     histogram clusters at six spikes whose centers *are* the gearbox — measured,
@@ -229,7 +238,8 @@ install there (reported from the field, 2026-07-30).
 **The emulator does not answer multi-PID requests**: the probe's 3-PID and
 6-PID batch tests come back `NO DATA` against it, so its rate verdict is a
 floor, not a prediction. **Settled on the car, 2026-07-30:** a real CAN car
-answers the batched request in one frame — 6/6 PIDs, at exactly the same
+answers the batched request in one message (an ISO-TP reply spanning three CAN
+frames) — 6/6 PIDs, at exactly the same
 request rate as a single PID. So the emulator understates *throughput* 6× while
 getting the *request rate* right, which is the opposite of the usual
 emulator-is-faster-than-hardware bias. Don't tune the poll schedule against it.
@@ -237,7 +247,7 @@ emulator-is-faster-than-hardware bias. Don't tune the poll schedule against it.
 `serial_for_url` gives one code path for real COM ports and `socket://` test
 targets. The parser's adversarial fixture tests (48 cases: single-frame,
 batched, ISO-TP multi-frame, spaced/unspaced/lowercase, multi-ECU, negative
-responses, the full ELM error vocabulary, truncation) live in
+responses, the ELM error strings the parser knows, truncation) live in
 [`probe/test_parse.py`](probe/test_parse.py):
 
 ```
