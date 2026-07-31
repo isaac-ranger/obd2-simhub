@@ -320,6 +320,15 @@ def run_probe(elm, report, args):
         print(f"  [{'x' if ok else ' '}] {pid:02X}  {name}")
     report["dash_pids_available"] = [f"{p:02X}" for p in available_dash]
 
+    # Gear is not one of the classic PIDs. J1979 defines A4 "transmission actual
+    # gear" in the extended range, but support is rare and vendor-dependent, and
+    # the encoding is worth confirming against a real responder before trusting
+    # it — so this is a support check only. Decoded in phase 2 if a car offers it;
+    # otherwise gear is derived from RPM/speed. Either way the answer is here.
+    has_gear = 0xA4 in supported
+    report["gear_pid_a4"] = has_gear
+    print(f"  [{'x' if has_gear else ' '}] A4  Transmission gear (extended; rarely offered)")
+
     # --- live values sanity check --------------------------------------------
     core = [p for p in BATCH_PRIORITY if p in available_dash]
     if core:

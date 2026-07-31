@@ -140,10 +140,19 @@ The probe is developed and tested against
 [ELM327-emulator](https://github.com/Ircama/ELM327-emulator):
 
 ```
-pip install ELM327-emulator pyserial
+pip install ELM327-emulator==3.0.3 pyserial
 python -m elm -n 35000 -s car          # terminal 1: fake car on TCP :35000
 python probe/obd_probe.py --port socket://127.0.0.1:35000   # terminal 2
 ```
+
+The version pin matters on Python 3.13 — later emulator releases fail to
+install there (reported from the field, 2026-07-30).
+
+**The emulator does not answer multi-PID requests**: the probe's 3-PID and
+6-PID batch tests come back `NO DATA` against it, and its rate verdict is
+therefore a floor, not a prediction. A real CAN car normally answers a batched
+request in one frame, which is the difference between ~5 and ~15-30 channel
+updates per second. Only the car can settle that number.
 
 `serial_for_url` gives one code path for real COM ports and `socket://` test
 targets. The parser's adversarial fixture tests (48 cases: single-frame,
