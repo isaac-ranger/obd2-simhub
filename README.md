@@ -59,6 +59,19 @@ Guessing those makes a bad bridge; measuring them takes five minutes.
    py probe\obd_probe.py --port COM5 --log drive.csv
    ```
 
+Turn a learning drive into gear constants with:
+```
+python probe/learn_gears.py reports/2026-07-31-kris-drive_01.csv
+python probe/learn_gears.py drive.csv --write calibration.json
+```
+`calibration.json` at the repo root is the file you edit by hand: when you
+swap wheels, change `active_set` — one line. `speed_factor` corrects the
+ECU's over-reported speed on smaller tires (true = reported × factor). The
+gear constants themselves are **tire-independent** — OBD speed and rpm both
+live upstream of actual tire size — so a wheel swap never re-learns gears.
+The first real log (2026-07-31, 982 GTS street set, all six gears swept) and
+the constants it produced ship in `reports/` and `calibration.json`.
+
 The probe is **read-only**: Mode 01 data requests and ELM configuration only.
 It never writes to the ECU and never touches trouble codes.
 
@@ -149,10 +162,11 @@ Design below is now settled against the measured numbers above:
   torque converter — but it creeps and launches on a slipping clutch under its
   own control, so its low-speed ratio data is garbage in a way a driver-operated
   clutch pedal at least announces.)
-  - **Learn the ratios, don't table them.** Published ratios drift against tire
-    wear and are simply wrong after a wheel/tire change. A drive log's ratio
-    histogram clusters at six spikes whose centers *are* the gearbox — measured,
-    and self-correcting.
+  - **Learn the ratios, don't table them.** Published gearbox ratios only
+    become rpm-per-km/h through an assumed tire circumference and final drive
+    — two more spec-sheet numbers to transcribe wrong. A drive log's ratio
+    histogram clusters at six spikes whose centers *are* the gearbox as the
+    ECU actually reports it — measured, no assumptions to get wrong.
   - **Clutch/neutral guard is mandatory on a manual.** Clutch in or in neutral,
     RPM ÷ speed is meaningless, and snap-to-nearest would flicker the readout
     through the whole H-pattern on every shift. Rule: a ratio not near one of
@@ -172,9 +186,9 @@ Design below is now settled against the measured numbers above:
     point, which any errand with a freeway on-ramp provides. Start the log
     before pulling out, ignore it completely while moving, Ctrl-C when
     parked, send back `drive.csv`. The ratio histogram then clusters at six
-    spikes whose centers are the gearbox as it actually is — measured off the
-    real tires, no spec sheet involved. The tool's job is to be boring; the
-    drive's job is to be a drive.
+    spikes whose centers are the gearbox as the ECU actually reports it —
+    measured off the car, no spec sheet involved. The tool's job is to be
+    boring; the drive's job is to be a drive.
 
 ### Phase 2 research notes (2026-07-30)
 
