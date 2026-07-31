@@ -131,12 +131,23 @@ Design below is now settled against the measured numbers above:
   the car actually provides. SimHub generates the exact C# packet struct
   ("copy demo code"), which drops into the extractor.
 - **Derived gear, because `A4` is confirmed absent on this car.** Gear comes
-  from the RPM ÷ speed ratio snapped to the nearest known ratio. Needs the
-  gearbox (982 GTS 4.0 ships as either 6-speed manual or 7-speed PDK — an open
-  question for the car's owner) and a clutch/neutral guard so the readout does
-  not thrash while coasting or shifting. Ratios can also be *learned* from a
-  drive log rather than tabled: the ratio histogram clusters hard at the real
-  gears.
+  from the RPM ÷ speed ratio snapped to the nearest known ratio. **Gearbox
+  confirmed by the owner 2026-07-30: 6-speed manual** (the 982 GTS 4.0 also
+  ships as a 7-speed PDK; this one is not that). The manual is the favourable
+  case — fixed ratios, no torque converter, so the ratio is arithmetic rather
+  than a fight with converter slip near a stop.
+  - **Learn the ratios, don't table them.** Published ratios drift against tire
+    wear and are simply wrong after a wheel/tire change. A drive log's ratio
+    histogram clusters at six spikes whose centers *are* the gearbox — measured,
+    and self-correcting.
+  - **Clutch/neutral guard is mandatory on a manual.** Clutch in or in neutral,
+    RPM ÷ speed is meaningless, and snap-to-nearest would flicker the readout
+    through the whole H-pattern on every shift. Rule: a ratio not near one of
+    the six learned clusters reads *neutral/shifting*, never a gear.
+  - **Blocking input: a drive log, which the phase 1 probe cannot produce** — it
+    measures and reports, with no logging mode. Next build is `--log`, RPM +
+    speed at 5 Hz to CSV; then one ordinary drive settling briefly in each of
+    the six gears yields the ratio set.
 
 ### Phase 2 research notes (2026-07-30)
 
