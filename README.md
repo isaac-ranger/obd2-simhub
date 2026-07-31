@@ -24,8 +24,8 @@ RPM/speed/throttle exactly as they would in a game.
 
 | Phase | What | State |
 |-------|------|-------|
-| 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready |
-| 2 | **Extractor** — poll loop + SimHub UDP feed, built around the probe's findings | designed, pending phase 1 results |
+| 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready — [first real-car run in](#phase-1-results--2025-718-cayman-gts-40-982) |
+| 2 | **Extractor** — poll loop + SimHub UDP feed, built around the probe's findings | design settled on measured numbers; build next |
 
 Phase 1 exists because the design hinges on three facts that vary per car:
 which protocol the car speaks (CAN vs. pre-2008 buses are wildly different in
@@ -64,24 +64,79 @@ live decoded values as a sanity check, and measured request rates — single-PID
 and batched (on CAN, up to 6 PIDs ride one request; that batching is the
 difference between choppy and smooth gauges).
 
+## Phase 1 results — 2025 718 Cayman GTS 4.0 (982)
+
+First real-car run, 2026-07-30, OBDLink MX+ over Bluetooth SPP. Raw report:
+[`reports/2026-07-30-kris-982-gts.json`](reports/2026-07-30-kris-982-gts.json).
+
+| | |
+|---|---|
+| Adapter | ELM327 v1.4b / STN2255 v5.12.4, 14.1 V |
+| Protocol | ISO 15765-4 CAN (11-bit, 500 kbaud), 1 ECU responding |
+| Mode 01 PIDs advertised | 56 |
+| Request rate | **5.0 Hz — identical at 1, 3, and 6 PIDs per request** |
+| Best channel throughput | **30 channel-updates/s** (6 PIDs × 5.0 Hz, 6/6 answered) |
+
+**Dashboard channels this car gives you:** engine load `04`, coolant temp `05`,
+timing advance `0E`, RPM `0C`, speed `0D`, throttle `11`, fuel level `2F`,
+barometric pressure `33`, module voltage `42`, **oil temp `5C`**.
+
+**Gaps:** no MAF `10`, no manifold pressure `0B`, no intake air temp `0F`, no
+fuel rate `5E`, and **no transmission gear `A4`** — gear has to be derived from
+RPM ÷ speed against the car's ratios.
+
+### The number that drives the whole design
+
+The rate is **5.0 Hz whether you ask for one PID or six**. The cost is the
+request round-trip, not the payload — so *batching is free*, and any request
+that carries fewer than 6 PIDs is wasting the trip.
+
+**This corrects an earlier claim in this file.** The pre-measurement guess here
+was "a 6-PID batch at ~15–30 Hz (≈100–180 channel-updates/s)." The car returned
+30 channel-updates/s — between 3× and 6× under. The request rate was the part
+that was over-estimated; batching worked exactly as predicted (6/6 answered in
+one message). Design accordingly, and treat rate guesses for other cars with
+matching suspicion.
+
+**5.0 Hz is a floor, and there is a known lever.** The probe deliberately omits
+the ELM327 expected-response-count digit (`010C0D11… 6`), which lets the adapter
+return as soon as it has the frames it was promised instead of waiting out its
+response timer. That is the first optimization phase 2 gets, and it is the one
+most likely to move the number.
+
 ## Phase 2 — the extractor (design)
 
-Built after phase 1 numbers are in:
+Design below is now settled against the measured numbers above:
 
-- **Tiered polling.** Fast tier (RPM, speed, throttle) batched at the max rate
-  the car sustains; slow tier (coolant, intake temp, fuel level, voltage)
-  refreshed every few seconds. OBD2 is request/response — bandwidth is spent
-  where the needles move.
-- **Decoupled UDP send.** The feed to SimHub runs at a fixed rate at or above
-  SimHub's stated 60 Hz minimum, sending last-known values, so SimHub's
-  rendering never stutters on OBD latency; optional light interpolation on
-  RPM/speed.
+- **Every request carries 6 PIDs — 3 fixed fast + 3 rotating slow.** Since a
+  6-PID request costs the same as a 1-PID request, the scheduler never sends a
+  short one. Fast slots are permanently RPM `0C`, speed `0D`, throttle `11`;
+  the remaining three slots rotate through the seven slow channels (load,
+  coolant, timing, fuel, baro, voltage, oil temp).
+
+  The arithmetic on the measured 5.0 Hz: fast channels land the **full 5 Hz**,
+  and seven slow channels through three rotating slots refresh every ⌈7/3⌉ = 3
+  requests ≈ **0.6 s** — comfortably fresh for temperatures and fuel level.
+  Naive round-robin over all ten channels would instead give RPM 1.5 Hz. The
+  batching structure *is* the tiering.
+- **Decoupled UDP send — now load-bearing, not optional.** With the car
+  delivering RPM at 5 Hz and SimHub wanting ≥60 Hz, the send loop is what stands
+  between the measurement and a visibly stepping tach. It runs at a fixed 60 Hz
+  off last-known values, and RPM/speed get **interpolation rather than
+  sample-and-hold** — at 5 Hz the difference is the whole feel of the gauge.
+  Interpolation must never be applied to the slow tier: a smoothly-drifting
+  coolant needle would be fiction.
 - **`.simdef` contract** authored in SimHub's built-in definition editor
   (Settings → enable *game definition authoring tools*), fields matching what
   the car actually provides. SimHub generates the exact C# packet struct
   ("copy demo code"), which drops into the extractor.
-- **Derived channels** where OBD2 has gaps: gear ≈ f(RPM, speed, final-drive
-  ratios), for example.
+- **Derived gear, because `A4` is confirmed absent on this car.** Gear comes
+  from the RPM ÷ speed ratio snapped to the nearest known ratio. Needs the
+  gearbox (982 GTS 4.0 ships as either 6-speed manual or 7-speed PDK — an open
+  question for the car's owner) and a clutch/neutral guard so the readout does
+  not thrash while coasting or shifting. Ratios can also be *learned* from a
+  drive log rather than tabled: the ratio histogram clusters hard at the real
+  gears.
 
 ### Phase 2 research notes (2026-07-30)
 
@@ -96,11 +151,20 @@ Findings that shape the design, banked here so they survive:
   [planetkris.com](https://planetkris.com/unlocking-the-porsche-718-can-bus/)
   reverse-engineered it (~40 hours): steering angle/speed, brake pressure,
   yaw rate, lateral/longitudinal G from the car's own ESP sensors, all four
-  wheel speeds, clutch pedal, oil data. Requires a physical harness tap
+  wheel speeds, clutch pedal, oil data. Requires physical access to the bus
   behind the gateway — a real decision on a warranty car, so it's an
   *optional future input*, not the plan. The extractor's `.simdef` will
   reserve fields for these channels so a tap (or any CAN source) can slot in
   without a contract change.
+- **Reversible access beats tapping** (718forum, user *nothingman*, reported
+  2026-07-30 — [thread](https://www.718forum.com/threads/successfully-hacked-my-718-gts-can-bus-for-racechrono-data.31918/)).
+  Rather than splicing the DRIVE CAN wires under the dash, he builds a
+  **pigtail**: back out the factory wires from their connector, run them
+  through an adapter harness, plug it back in. Same approach the ASR/Cargraphic
+  valve-control units use. Nothing is cut, and it un-does in minutes — which
+  materially lowers the cost of the "should I tap the bus" decision on a car
+  under warranty. This is the route to prefer if the chassis channels ever
+  become worth having.
   (Investigative aside: planetkris is a Cayman-driving, CAN-dissecting
   tinkerer named Kris. This project's instigator is a Cayman-driving,
   debug-log-wielding tinkerer named Kris who bills himself "Vehicle
@@ -129,10 +193,13 @@ live in OEM-specific PIDs — the MX+'s "OEM add-ons" reach them, but only
 inside the OBDLink app; they're a research topic per manufacturer, not a
 day-one feature.
 
-Realistic rates on a CAN car with an MX+: a 6-PID batch at ~15–30 Hz
-(≈ 100–180 channel-updates/s) is a sensible expectation — plenty for smooth
-gauges. Pre-CAN cars (ISO 9141 / KWP / J1850): more like 4–10 PID reads/s
-total; workable with tiered polling, but set expectations accordingly.
+Realistic rates on a CAN car with an MX+: ~~a 6-PID batch at ~15–30 Hz
+(≈ 100–180 channel-updates/s)~~ — **this guess was 3–6× too optimistic and the
+one measurement we have says 5 Hz / 30 channel-updates/s** (see [phase 1
+results](#phase-1-results--2025-718-cayman-gts-40-982)). Expect the request rate
+to be the binding constraint and the batch width to be free. Pre-CAN cars
+(ISO 9141 / KWP / J1850) are slower still. Run the probe; don't budget off
+anyone's estimate, including this file's.
 
 ## Development without a car
 
@@ -149,10 +216,12 @@ The version pin matters on Python 3.13 — later emulator releases fail to
 install there (reported from the field, 2026-07-30).
 
 **The emulator does not answer multi-PID requests**: the probe's 3-PID and
-6-PID batch tests come back `NO DATA` against it, and its rate verdict is
-therefore a floor, not a prediction. A real CAN car normally answers a batched
-request in one frame, which is the difference between ~5 and ~15-30 channel
-updates per second. Only the car can settle that number.
+6-PID batch tests come back `NO DATA` against it, so its rate verdict is a
+floor, not a prediction. **Settled on the car, 2026-07-30:** a real CAN car
+answers the batched request in one frame — 6/6 PIDs, at exactly the same
+request rate as a single PID. So the emulator understates *throughput* 6× while
+getting the *request rate* right, which is the opposite of the usual
+emulator-is-faster-than-hardware bias. Don't tune the poll schedule against it.
 
 `serial_for_url` gives one code path for real COM ports and `socket://` test
 targets. The parser's adversarial fixture tests (48 cases: single-frame,
