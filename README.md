@@ -165,8 +165,16 @@ Design below is now settled against the measured numbers above:
     the car's measured rate, one CSV row per sample (`t_s,rpm,speed_kmh,
     throttle_pct`), every row flushed as written so a laptop dying mid-drive
     keeps everything up to its last sample. Ctrl-C ends it cleanly; transient
-    hiccups are skipped rather than fatal. One ordinary drive settling briefly
-    in each of the six gears yields the ratio set.
+    hiccups are skipped rather than fatal.
+
+    **The drive protocol:** one ordinary drive — no special route, no heroics.
+    It just needs a few settled seconds in each of the six gears at some
+    point, which any errand with a freeway on-ramp provides. Start the log
+    before pulling out, ignore it completely while moving, Ctrl-C when
+    parked, send back `drive.csv`. The ratio histogram then clusters at six
+    spikes whose centers are the gearbox as it actually is — measured off the
+    real tires, no spec sheet involved. The tool's job is to be boring; the
+    drive's job is to be a drive.
 
 ### Phase 2 research notes (2026-07-30)
 
