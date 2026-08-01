@@ -286,16 +286,6 @@ responses, the ELM error strings the parser knows, truncation) live in
 python probe/test_parse.py
 ```
 
-## A note on "OBDwiz on GitHub"
-
-OBDLink's **OBDwiz** software is closed-source. Official downloads come only
-from the vendor sites — [obdlink.com](https://www.obdlink.com/) /
-scantool.net (OBD Solutions) or the developer's
-[obdsoftware.net](https://www.obdsoftware.net/) (OCTech). It has **no
-official GitHub repository** — repos offering OBDwiz downloads (typically a
-README with a Dropbox/password-protected archive) are malware lures. Don't
-run them.
-
 ## License
 
 MIT
