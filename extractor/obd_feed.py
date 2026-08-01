@@ -202,6 +202,40 @@ class GearWatch:
         return self.shown
 
 
+class GearDisplay:
+    """What the dashboard shows, as opposed to what the judge knows.
+
+    GearWatch is honest: the moment the clutch breaks the ratio it reads 0,
+    and the run log records that truth (57% of Kris's drive_02 samples are
+    honest N — 1:36 of it standing still, 57s of it clutch-in coasting).
+    Correct in the log, broken-looking on a stream overlay: viewers see the
+    gear widget flash N through every shift and coast.
+
+    So the dash gets a held view: keep showing the last engaged gear while
+    the car is still rolling, N when actually standing or the engine is
+    off. The hold is display-only — the log and the judge never see it.
+
+    Known soft spot, accepted: OBD speed is unsigned, so backing up at
+    walking pace can wear the last forward gear for a moment (below
+    STAND_KMH it clears). A learned-ratio gearbox cannot see reverse at
+    all — that line is already in the layout contract."""
+
+    STAND_KMH = 3.0     # at or below: actually stopped, show N
+
+    def __init__(self):
+        self.held = 0
+
+    def feed(self, honest, rpm, speed_kmh):
+        if rpm < GearWatch.ENGINE_OFF_RPM:
+            self.held = 0                  # engine off is not a debate here
+        elif honest > 0:
+            self.held = honest             # the judge is sure: follow it
+        elif speed_kmh <= self.STAND_KMH:
+            self.held = 0                  # standing in neutral: honest N
+        # else: rolling with the clutch in — keep wearing the last gear
+        return self.held
+
+
 # --------------------------------------------------------------------------
 # Live vehicle state, shared between the poll loop (writer) and the UDP
 # sender (reader). RPM and speed keep their previous sample too, so the
@@ -212,13 +246,16 @@ class CarState:
     INTERP = (0x0C, 0x0D)
     STALE_S = 2.0     # newest sample older than this = the car left the call
 
-    def __init__(self, gear_watch, speed_factor=1.0):
+    def __init__(self, gear_watch, speed_factor=1.0, display_hold=True):
         self.lock = threading.Lock()
         self.values = {}                 # pid -> (value, t)
         self.prev = {}                   # pid -> (value, t) one sample older
         self.gear_watch = gear_watch
         self.speed_factor = speed_factor
         self.gear = 0
+        self.display_hold = display_hold
+        self.gear_display = 0
+        self._display = GearDisplay()
         self.poll_period = 0.25          # EMA of sample spacing, seeded at 4 Hz
         self._last_t = None
 
@@ -238,6 +275,8 @@ class CarState:
             spd = self.values.get(0x0D, (0.0, t))[0]
             self.gear = self.gear_watch.feed(
                 rpm, spd, t if gear_t is None else gear_t)
+            self.gear_display = (self._display.feed(self.gear, rpm, spd)
+                                 if self.display_hold else self.gear)
             if self._last_t is not None:
                 dt = t - self._last_t
                 if 0.0 < dt < 2.0:
@@ -271,7 +310,8 @@ class CarState:
         dashboard for as long as the poll loop kept hoping."""
         with self.lock:
             if self._last_t is not None and now - self._last_t > self.STALE_S:
-                return {"pids": {}, "gear": 0, "true_speed_kmh": 0.0}
+                return {"pids": {}, "gear": 0, "gear_display": 0,
+                        "true_speed_kmh": 0.0}
             render_t = now - self.poll_period
             rpm = self._interp(0x0C, render_t)
             speed_raw = self._interp(0x0D, render_t)
@@ -281,6 +321,7 @@ class CarState:
         return {
             "pids": out,
             "gear": self.gear,
+            "gear_display": self.gear_display,
             "true_speed_kmh": speed_raw * self.speed_factor,
         }
 
@@ -349,7 +390,7 @@ class Packer:
         if src == "derived:true_speed_kmh":
             return float(snap["true_speed_kmh"])
         if src == "derived:gear_text":
-            return gear_char(snap["gear"])
+            return gear_char(snap.get("gear_display", snap["gear"]))
         if src == "derived:throttle_01":
             return float(snap["pids"].get(0x11, 0.0)) / 100.0
         if src == "derived:ignition_on":
@@ -479,6 +520,14 @@ def gear_char(g):
     return GEAR_CHARS.get(g, str(g))
 
 
+def gear_status(snap):
+    """Console form: honest gear, plus what the dash is wearing when the
+    display hold has them disagreeing — 'N (dash 2)' during a coast."""
+    honest = gear_char(snap["gear"])
+    dash = gear_char(snap.get("gear_display", snap["gear"]))
+    return honest if dash == honest else f"{honest} (dash {dash})"
+
+
 class RunLog:
     """Every run logs its samples to CSV as a side effect — free drive data.
     Same format as probe --log plus whatever slow channels each sample has."""
@@ -605,7 +654,7 @@ def poll_car(args, state, run_log, sender, sched, elm, digit):
             rpm = snap["pids"].get(0x0C, 0.0)
             print(f"  t {t:5.0f}s  RPM {rpm:5.0f}  "
                   f"speed {fmt_speed(snap['true_speed_kmh'], units)} (true)  "
-                  f"gear {gear_char(snap['gear'])}  "
+                  f"gear {gear_status(snap)}  "
                   f"poll {n / t if t else 0.0:4.1f} Hz  "
                   f"udp {sender.sent} pkts", flush=True)
 
@@ -647,7 +696,7 @@ def poll_replay(args, state, run_log, sender):
             snap = state.snapshot(time.monotonic())
             print(f"  t {t_s:5.0f}s  RPM {decoded.get(0x0C, 0.0):5.0f}  "
                   f"speed {fmt_speed(snap['true_speed_kmh'], units)} (true)  "
-                  f"gear {gear_char(snap['gear'])}  udp {sender.sent} pkts",
+                  f"gear {gear_status(snap)}  udp {sender.sent} pkts",
                   flush=True)
     print(f"\nReplay done. {sender.sent} packets sent, "
           f"{sender.errors} send errors.")
@@ -711,6 +760,12 @@ def main():
     ap.add_argument("--dwell", type=float, default=GearWatch.DWELL_S,
                     help="seconds of steady agreement before the gear "
                          "readout changes (default %(default)s)")
+    ap.add_argument("--dash-gear", choices=["hold", "honest"], default="hold",
+                    help="what the SimHub gear widget wears while the clutch "
+                         "is in: 'hold' keeps the last engaged gear while "
+                         "rolling (default, overlay-friendly); 'honest' "
+                         "shows the judge's N. The run log always logs "
+                         "honest.")
     ap.add_argument("--log-dir", default="runs",
                     help="run-log directory (default: runs/)")
     ap.add_argument("--register", action="store_true",
@@ -757,7 +812,8 @@ def main():
     speed_factor = float(sets.get(active, {}).get("speed_factor", 1.0))
 
     state = CarState(GearWatch(constants, tol, dwell_s=args.dwell),
-                     speed_factor=speed_factor)
+                     speed_factor=speed_factor,
+                     display_hold=(args.dash_gear == "hold"))
     engine = calibration.get("engine", {})
     packer = Packer(layout, cal={
         "max_gears": len(constants),
@@ -787,6 +843,9 @@ def main():
     print(f"Run log   -> {run_log.path}")
     print(f"Units     -> {args.resolved_units}   "
           f"tire set -> {active} (speed factor {speed_factor:g})")
+    print(f"Dash gear -> {args.dash_gear}"
+          + ("  (holds last gear while rolling; log stays honest)"
+             if args.dash_gear == "hold" else ""))
     print(f"Contract  -> SimHub definition {layout.get('unique_id')} "
           f"(layout v{layout['header'][2].get('value', '?')}."
           f"{layout['header'][3].get('value', '?')})")

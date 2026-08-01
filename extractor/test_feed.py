@@ -17,8 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, os.pardir, "probe"))
 
-from obd_feed import (Scheduler, GearWatch, CarState, Packer, Sender,
-                      RunLog, decode_sample, display_units, fmt_speed,
+from obd_feed import (Scheduler, GearWatch, GearDisplay, CarState, Packer,
+                      Sender, RunLog, decode_sample, display_units, fmt_speed,
                       fmt_temp, MIN_RPM, MIN_SPEED)
 import fake_car
 
@@ -204,6 +204,60 @@ ok("drive_01: the readout tells the drive's exact story, no phantoms",
    changes == [1, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1],
    f"engagements: {changes}")
 
+# --- gear display hold -------------------------------------------------------
+
+gd = GearDisplay()
+ok("display: engaged gear passes through", gd.feed(2, 3000.0, 40.0) == 2)
+ok("display: moving neutral holds the last gear",
+   gd.feed(0, 1500.0, 35.0) == 2)
+ok("display: still holding through a long coast",
+   all(gd.feed(0, 900.0, s) == 2 for s in (30.0, 20.0, 10.0, 5.0)))
+ok("display: standing neutral clears to N", gd.feed(0, 800.0, 0.0) == 0)
+gd.feed(3, 3000.0, 40.0)
+ok("display: engine off clears a held gear", gd.feed(0, 0.0, 20.0) == 0)
+
+# the real drive through the hold. The promise is scoped: while rolling
+# WITH an engagement since the last standstill (or engine cut), the dash
+# never wears N. Launch windows — rolling away from a stop before 1st
+# confirms — honestly read N, and that is correct, not a hold failure.
+drive2 = os.path.join(REPO, "reports", "2026-07-31-kris-drive_02.csv")
+gd2, honest_n, dash_n, viol = GearDisplay(), 0, 0, 0
+have_gear_since_stop = False
+with open(drive2, newline="") as f:
+    for row in _csv.DictReader(f):
+        g, rpm, spd = int(row["gear"]), float(row["rpm"]), \
+            float(row["speed_kmh"])
+        d = gd2.feed(g, rpm, spd)
+        if spd <= GearDisplay.STAND_KMH or rpm < GearWatch.ENGINE_OFF_RPM:
+            have_gear_since_stop = False
+        if g > 0:
+            have_gear_since_stop = True
+        honest_n += g == 0
+        dash_n += d == 0
+        if have_gear_since_stop and spd > GearDisplay.STAND_KMH and d == 0:
+            viol += 1
+ok("display drive_02: held gear never drops to N mid-roll",
+   viol == 0, f"{viol} violations")
+ok("display drive_02: the hold absorbs the clutch-in coasting",
+   honest_n - dash_n >= 100 and 0 < dash_n < honest_n,
+   f"honest N {honest_n}, dash N {dash_n}, absorbed {honest_n - dash_n}")
+
+# CarState honors --dash-gear honest. Clutch-in samples sit BELOW MIN_RPM
+# on purpose: mid-band rpm/speed pairs exist (1200 rpm at 35 km/h IS 4th's
+# ratio) and with a zero dwell the judge would rightly take them.
+cs = CarState(GearWatch(CONSTANTS, TOL, dwell_s=0.0), display_hold=False)
+for i in range(4):
+    cs.update({0x0C: CONSTANTS[1] * 40.0, 0x0D: 40.0}, float(i),
+              gear_t=float(i))
+ok("display: honest-mode judge confirms 2nd first", cs.gear == 2,
+   f"{cs.gear}")
+cs.update({0x0C: 850.0, 0x0D: 35.0}, 4.0, gear_t=4.0)
+cs.update({0x0C: 840.0, 0x0D: 34.0}, 5.0, gear_t=5.0)
+snap_h = cs.snapshot(5.0)
+ok("display: honest mode never holds",
+   snap_h["gear"] == 0 and snap_h["gear_display"] == 0,
+   f"{snap_h['gear']} / {snap_h['gear_display']}")
+
 # --- packer: the real SimHub contract ----------------------------------------
 
 with open(os.path.join(HERE, "feed_layout.json"), encoding="utf-8") as f:
@@ -229,6 +283,9 @@ ok("packer: EngineRpm survives the round trip",
    abs(back["EngineRpm"] - 4321.0) < 0.5, f"{back['EngineRpm']}")
 ok("packer: Gear is the string '4'", back["Gear"] == "4",
    f"{back['Gear']!r}")
+held = pk.unpack(pk.pack({**snap, "gear": 0, "gear_display": 2}, RT))
+ok("packer: Gear wears the display hold, not the honest N",
+   held["Gear"] == "2", f"{held['Gear']!r}")
 ok("packer: PacketsCounter lands in the header",
    back["PacketsCounter"] == 7)
 ok("packer: SpeedKmh is true speed, not raw OBD speed",

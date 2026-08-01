@@ -25,7 +25,8 @@ RPM/speed/throttle exactly as they would in a game.
 | Phase | What | State |
 |-------|------|-------|
 | 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready — [first real-car run in](#phase-1-results--2025-718-cayman-gts-40-982) |
-| 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested, speaking the **real SimHub contract** ([PR #2](https://github.com/isaac-ranger/obd2-simhub/pull/2)'s .simdef + generated constants, 101 bytes, verified byte-for-byte) — [run it](#phase-2--run-the-extractor) |
+| 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested, speaking the **real SimHub contract** ([PR #2](https://github.com/isaac-ranger/obd2-simhub/pull/2)'s .simdef + generated constants, 101 bytes, verified byte-for-byte) — [run it](#phase-2--run-the-extractor). **Confirmed on the real car 2026-07-31** — speed, RPM, gear, fuel all correct on the road. |
+| — | **`report.py`** — post-drive report from any run log | ✅ new — [after the drive](#after-the-drive-the-report) |
 
 Phase 1 exists because the design hinges on three facts that vary per car:
 which protocol the car speaks (CAN vs. pre-2008 buses are wildly different in
@@ -240,6 +241,43 @@ have been to the Moon. The wire feed and CSV logs stay metric/SI because
 SimHub and arithmetic prefer it; dashboards convert at the glass, where
 conversion belongs. `--units metric` overrides per run if a passenger
 objects.
+
+**Dash gear:** the gear judge is honest — the moment the clutch breaks the
+rpm/speed ratio it says N, and on your first real drive that was 57% of all
+samples (a minute and a half standing at lights, another minute of clutch-in
+coasting). Correct in the log; on a stream overlay it reads as a broken
+widget flashing N through every shift. So the dash now wears a **held**
+view by default: the last engaged gear stays up while the car is still
+rolling, N only when actually stopped (or the engine is off). The run log
+and the judge never see the hold — logs stay honest, always. `--dash-gear
+honest` puts the raw judge on the dash if you'd rather watch it think.
+
+### After the drive: the report
+
+Every run logs itself (`runs/*.csv`). The log can testify to more than the
+dashboard showed, and `report.py` takes its deposition:
+
+```
+python report.py runs/feed-20260731-204617.csv
+```
+
+Five sections, all auditable from the definitions in the file's docstring:
+cadence and channel coverage; the gear ladder measured **this** drive
+against calibration (your first street drive re-confirmed gears 1–4 within
+0.5%, without knowing it was doing calibration work); shifts — timed clutch
+windows, separated from coasting, including downshifts rev-matched so
+cleanly the judge never saw neutral; warm-up; extremes. Two findings from
+your 2026-07-31 drive it would have handed you on the spot:
+
+* your two quick upshifts had clutch windows of 0.75 s and 0.94 s, and the
+  4→3 downshift never showed neutral at all — a clean rev-match, measured;
+* when the coolant said *ready* (90 °C at t=160 s), the oil was at 62 °C —
+  and it never reached 80 °C in the whole drive. The coolant gauge is not
+  an oil gauge; the CSV has been recording the difference all along.
+
+Both drives so far are in `reports/` (`drive_01` the calibration sweep,
+`drive_02` the first street drive) and the test suites replay them — every
+drive you log makes the tools harder to break.
 
 ### The SimHub contract (delivered before it was even asked for)
 
