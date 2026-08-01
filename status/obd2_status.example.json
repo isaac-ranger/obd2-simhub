@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "state": "LIVE",
+  "healthy": true,
+  "summary": "The car is talking to SimHub and data has been flowing for 47 minutes. It recovered from 1 interruption along the way.",
+  "updated_at": "2026-08-01T16:23:34Z",
+  "updated_unix": 1785601414,
+  "stale_after_s": 10,
+  "detail": {
+    "mode": "live",
+    "state_since": "2026-08-01T16:23:34Z",
+    "seconds_in_state": 2847,
+    "last_data_at": "2026-08-01T16:23:34Z",
+    "seconds_since_data": 0.4,
+    "samples_seen": 4211,
+    "restarts": 1,
+    "last_restart_at": "2026-08-01T16:23:34Z",
+    "last_exit": {
+      "code": 1,
+      "reason": "25 consecutive failed samples - the car has left the conversation. Log kept: runs/2026-08-01-drive.csv"
+    },
+    "feed_pid": 8412,
+    "supervisor_started_at": "2026-08-01T16:23:34Z",
+    "supervisor_uptime_s": 3021
+  }
+}

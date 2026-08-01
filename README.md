@@ -26,6 +26,7 @@ RPM/speed/throttle exactly as they would in a game.
 |-------|------|-------|
 | 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready — [first real-car run in](#phase-1-results--2025-718-cayman-gts-40-982) |
 | 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested, speaking the **real SimHub contract** ([PR #2](https://github.com/isaac-ranger/obd2-simhub/pull/2)'s .simdef + generated constants, 101 bytes, verified byte-for-byte) — [run it](#phase-2--run-the-extractor). **Confirmed on the real car 2026-07-31** — speed, RPM, gear, fuel all correct on the road. |
+| 3 | **`supervisor/supervisor.py`** — keeps the feed alive unattended, publishes a status file | ✅ new — [run it](#phase-3--the-supervisor-unattended-operation) |
 | — | **`report.py`** — post-drive report from any run log | ✅ new — [after the drive](#after-the-drive-the-report) |
 
 Phase 1 exists because the design hinges on three facts that vary per car:
@@ -392,6 +393,57 @@ results](#phase-1-results--2025-718-cayman-gts-40-982)). Expect the request rate
 to be the binding constraint and the batch width to be free. Pre-CAN cars
 (ISO 9141 / KWP / J1850) are slower still. Run the probe; don't budget off
 anyone's estimate, including this file's.
+
+## Phase 3 — the supervisor (unattended operation)
+
+Phase 2 answered *can the car talk to SimHub*. Phase 3 answers *can it keep
+doing that for three hours while your hands are full* — which is a different
+engineering problem, and the one that has to work at an event.
+
+```
+py supervisor\supervisor.py -- --port COM3
+```
+
+Everything after `--` goes to `obd_feed.py` untouched, so every flag the feed
+has (or grows later) works here unchanged.
+
+**Scope, deliberately narrow.** It owns the extractor's lifecycle and nothing
+else — not OBS, not VoiceAttack, not SimHub, not the router. Those are other
+people's processes with their own ideas about startup, and a supervisor that
+tries to restart OBS mid-event can do more harm than the failure it's fixing.
+This one babysits the piece where it can actually detect state and recover it.
+
+**How it knows.** The feed already prints a status line every second with
+`flush=True`. The supervisor reads the child's stdout and treats that line as
+the liveness signal — so it needed no change to `obd_feed.py`, and the signal
+means *data actually moved*, not *the process is still resident*. A process can
+be alive and wedged; a printed sample cannot.
+
+Three failures, three responses:
+
+| what happens | what it does |
+|---|---|
+| feed exits (25 misses, sender death, an outright crash) | restarts it after a backoff that resets once a run has been healthy |
+| feed alive but silent past `--stall-seconds` | reports `STALLED`, keeps watching — it may come back on its own |
+| adapter was never there | reports `NO_ADAPTER`, keeps retrying forever |
+
+That last row is the one that matters in pre-grid. The supervisor can't
+power-cycle the adapter for you — but it never stops trying, so when you *do*
+pull and replug the MX+, the feed comes back on its own and you never touch
+the keyboard.
+
+**It says so out loud.** Status goes to `status/obd2_status.json`, rewritten
+atomically once a second, carrying a plain-English `summary` sentence meant to
+be dropped straight into PitGirl's context. See
+[`status/README.md`](status/README.md) for the field reference and — the one
+rule that matters — the staleness check any reader must do, because a dead
+supervisor leaves a file that still cheerfully says `LIVE`.
+
+Tests: `python supervisor/test_supervisor.py`. They inject the four ways a real
+feed fails (never starts, runs clean, dies mid-drive, dies instantly and
+repeatedly) rather than asserting on internal state — the whole point of the
+layer is recovering from failures nobody predicted, so the tests do the
+predicting badly on purpose.
 
 ## Development without a car
 
