@@ -265,8 +265,10 @@ worth knowing about:
   a learned-ratio gearbox cannot see reverse, and it would rather say
   nothing than guess.
 * **Fuel** wants liters; PID `2F` gives percent. The tank size lives in
-  `calibration.json` (`engine.fuel_tank_l`, set to the standard 54 L — if
-  the car has the optional 64 L extended tank, correct that one number).
+  `calibration.json` (`engine.fuel_tank_l` = 64 L / 16 gal, owner-stated —
+  he flagged the liters-vs-percent conversion himself, in an email that
+  crossed ours making the same point. This project has developed a habit
+  of answering its own questions before they arrive).
 
 What's left on the SimHub machine, once:
 

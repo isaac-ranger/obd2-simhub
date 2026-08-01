@@ -6,7 +6,7 @@
   },
   "engine": {
     "max_rpm": 8000,
-    "fuel_tank_l": 54.0
+    "fuel_tank_l": 64.0
   },
   "tire_sets": {
     "stock_20": {
@@ -34,7 +34,7 @@
   "_notes": {
     "active_set": "Edit this line when you swap wheels. Everything else stays.",
     "units": "display: 'imperial' (mph, F) or 'metric' (km/h, C). Console/readout only — CSV logs and the UDP feed stay SI; dashboards convert at the glass. Override per run with --units.",
-    "engine": "max_rpm: 982 GTS 4.0 spec redline (owner's 7,622 pull 'not high enough to engage the rev limiter' agrees). fuel_tank_l: standard 718 tank is 54 L; if the car has the optional 64 L extended tank, correct this one number and SimHub's fuel gauge becomes honest. Feeds SimHub's EngineMaxRpm/MaxFuel and the Fuel percent-to-liters conversion.",
+    "engine": "max_rpm: 982 GTS 4.0 spec redline (owner's 7,622 pull 'not high enough to engage the rev limiter' agrees). fuel_tank_l: 64 L / 16 gal, owner-stated (2026-07-31 email) — the owner's number outranks the spec sheet here. Feeds SimHub's EngineMaxRpm/MaxFuel and the Fuel percent-to-liters conversion.",
     "speed_factor": "true speed = OBD-reported speed * speed_factor. The ECU assumes a fixed tire circumference; smaller tires make it over-report. Factors here are rear-diameter ratios vs stock; a GPS-vs-OBD-speed check at steady highway speed would pin them tighter (not GPS-vs-dash: the dash speedometer carries its own deliberate over-read that this factor is never applied to).",
     "gears": "rpm_per_kmh per gear, 1st..6th, learned from a real drive log by probe/learn_gears.py. Tire-independent: OBD speed and rpm both live upstream of actual tire size, so these never change with a wheel swap.",
     "tolerance_pct": "a live rpm/speed ratio within this % of a gear's constant reads as that gear; nearest constant wins if bands ever touch; outside every band reads neutral/shifting. The tightest step (5th to 6th, ~15.9%) keeps +/-t bands clear of each other only for t below ~7.3, hence 7. The live readout also needs ~0.35s of steady agreement (time-based, so it can't silently loosen as polling gets faster) before it changes gear, or clutch-in rpm sweeps flash fake gears on every shift."
