@@ -25,7 +25,7 @@ RPM/speed/throttle exactly as they would in a game.
 | Phase | What | State |
 |-------|------|-------|
 | 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready — [first real-car run in](#phase-1-results--2025-718-cayman-gts-40-982) |
-| 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested — [run it](#phase-2--run-the-extractor), including against a recorded drive. Awaiting one two-minute favor: [the SimHub contract](#the-simhub-contract-the-two-minute-favor) |
+| 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested, speaking the **real SimHub contract** ([PR #2](https://github.com/isaac-ranger/obd2-simhub/pull/2)'s .simdef + generated constants, 101 bytes, verified byte-for-byte) — [run it](#phase-2--run-the-extractor) |
 
 Phase 1 exists because the design hinges on three facts that vary per car:
 which protocol the car speaks (CAN vs. pre-2008 buses are wildly different in
@@ -216,6 +216,11 @@ UDP feed with RPM/speed interpolated between samples — a needle that sweeps
 instead of stepping. Every run also logs itself to `runs/*.csv` as a side
 effect, so every errand is free calibration data.
 
+(Python 3.11+ recommended on Windows: older versions sleep in 15.6 ms
+gulps, which fights a 60 Hz send loop. The sender spin-guards its last two
+milliseconds either way, so 3.9/3.10 still work — they just pay a little
+more CPU for their punctuality.)
+
 No car handy? Feed it your own recorded drive and watch the pipeline call
 your gears back at you:
 
@@ -236,29 +241,51 @@ SimHub and arithmetic prefer it; dashboards convert at the glass, where
 conversion belongs. `--units metric` overrides per run if a passenger
 objects.
 
-### The SimHub contract (the two-minute favor)
+### The SimHub contract (delivered before it was even asked for)
 
-The one piece that cannot be built from this side of the screen: SimHub's
-External Sim Integration generates its packet-identification constants
-inside the SimHub UI, and nobody has published the format (we looked;
-GitHub-wide, zero examples — this feature is that new). So, once, on the
-SimHub PC:
+This section used to be a request: SimHub generates its
+packet-identification constants inside its own UI, nobody has published the
+format anywhere (we looked — GitHub-wide, zero examples; this feature is
+that new), so someone with SimHub open needed to click **copy demo code**
+and send the paste. By the time the request was pushed, [PR
+#2](https://github.com/isaac-ranger/obd2-simhub/pull/2) had already arrived
+carrying the whole thing: `simdef/obd2-simhub.simdef`, the logo, and the
+generated sender in `extractor/demo_code_01.cs`. Fastest round-trip in this
+project's history, and it never even left the repo.
 
-1. Confirm SimHub ≥ **9.11.5** (the feature is beta and arrived there).
-2. Settings → Global → enable **game definition authoring tools**.
-3. In the new editor: create a definition — name it, give it a unique ID,
-   and declare exactly these fields (SimHub's docs say never declare what
-   you can't provide; this list is what your car provides):
-   `rpm, speed, gear, throttle, engine load, coolant temp, oil temp,
-   fuel level, barometric pressure, battery voltage`.
-4. Click **copy demo code (C#)** and send back the paste, plus the
-   definition's default UDP port.
+`extractor/feed_layout.json` is now that generated struct transcribed —
+Pack=1, little-endian, **101 bytes**, `GameSignature 0x51963903`,
+`TelemetrySignature 0x8A3F0EE7`, port **35353** — and the test suite packs
+a packet and checks it against the contract's own `ExpectedPacketLength`
+and signature bytes. Three translations the generated comments dictated,
+worth knowing about:
 
-The constants from that paste get transcribed into
-`extractor/feed_layout.json` (the packer is config-driven precisely so this
-is a JSON edit, not a code change), and then SimHub's Telemetry Receiver
-Tester should show live values. That paste is the last unknown between here
-and a real tach needle on your overlay.
+* **Throttle** goes on the wire as 0–1 (the PID speaks 0–100).
+* **Gear** is an 8-byte NUL-terminated string — `N`, `1`…`6`. Never `R`:
+  a learned-ratio gearbox cannot see reverse, and it would rather say
+  nothing than guess.
+* **Fuel** wants liters; PID `2F` gives percent. The tank size lives in
+  `calibration.json` (`engine.fuel_tank_l`, set to the standard 54 L — if
+  the car has the optional 64 L extended tank, correct that one number).
+
+What's left on the SimHub machine, once:
+
+1. SimHub ≥ **9.11.5** (the feature is beta and arrived there).
+2. `py extractor\obd_feed.py --register` — writes the `.simlink`
+   registration pointing SimHub at the repo's `.simdef`. (The manual calls
+   the file `.shlink`; the generated code says `.simlink`. We sided with
+   the code that SimHub itself wrote.)
+3. Activate **OBD2 SimHub** in SimHub's sim list. Auto-detection watches
+   for a process named `Obd2SimHub`, which a Python script is not — either
+   activate manually, or indulge in the one-liner:
+   ```
+   copy .venv\Scripts\python.exe .venv\Scripts\Obd2SimHub.exe
+   ```
+   and launch the feed with that. Windows names the process after the exe,
+   SimHub sees its sim arrive, and nobody needs to know the sim is a
+   Porsche with a Python interpreter in the passenger seat.
+4. **Telemetry Receiver Tester** (in the definition editor) shows the live
+   values if anything needs eyeballing.
 
 ### Phase 2 research notes (2026-07-30)
 

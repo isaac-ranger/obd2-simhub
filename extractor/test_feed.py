@@ -1,0 +1,403 @@
+"""Tests for the phase 2 feed. Run: python extractor/test_feed.py
+
+Covers the scheduler, gear inference (including a full replay of Kris's real
+drive_01 log — the log asserts its own story back), the packer, the
+interpolating state, units, the run log, and — when pyserial is present —
+the whole pipeline end to end against fake_car.py, batched multi-frame
+replies and all. Stdlib only apart from that optional leg.
+"""
+import json
+import os
+import socket
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, os.pardir, "probe"))
+
+from obd_feed import (Scheduler, GearWatch, CarState, Packer, Sender,
+                      RunLog, decode_sample, display_units, fmt_speed,
+                      fmt_temp, MIN_RPM, MIN_SPEED)
+import fake_car
+
+REPO = os.path.join(HERE, os.pardir)
+DRIVE = os.path.join(REPO, "reports", "2026-07-31-kris-drive_01.csv")
+
+with open(os.path.join(REPO, "calibration.json"), encoding="utf-8") as f:
+    CAL = json.load(f)
+CONSTANTS = CAL["gears"]["rpm_per_kmh"]
+TOL = CAL["gears"]["tolerance_pct"]
+
+FAILED = []
+
+
+def ok(name, cond, detail=""):
+    if cond:
+        print(f"PASS  {name}")
+    else:
+        print(f"FAIL  {name}  {detail}")
+        FAILED.append(name)
+
+
+# --- scheduler -------------------------------------------------------------
+
+sup = {0x0C, 0x0D, 0x11, 0x04, 0x05, 0x5C, 0x2F, 0x33, 0x42}
+s = Scheduler(sup)
+reqs = [s.next_pids() for _ in range(4)]
+ok("scheduler: every request carries the fast three",
+   all(set(r) >= {0x0C, 0x0D, 0x11} for r in reqs), f"{reqs}")
+ok("scheduler: never more than one CAN message worth",
+   all(len(r) <= 6 for r in reqs), f"{reqs}")
+covered = set().union(*[set(r) for r in reqs[:2]])
+ok("scheduler: all six slow channels inside two requests",
+   covered >= sup, f"two requests covered {sorted(hex(p) for p in covered)}")
+ok("scheduler: slow refresh estimate sane",
+   0.3 < s.slow_refresh_s(4.5) < 0.6, f"{s.slow_refresh_s(4.5)}")
+
+s2 = Scheduler({0x0C, 0x0D, 0x11})
+ok("scheduler: no slow channels — fast only, no crash",
+   s2.next_pids() == [0x0C, 0x0D, 0x11])
+
+try:
+    Scheduler({0x04, 0x05})
+    ok("scheduler: refuses a car with no fast channels", False)
+except Exception:
+    ok("scheduler: refuses a car with no fast channels", True)
+
+# --- gear inference ---------------------------------------------------------
+
+DT = 0.213                                 # the drive log's native pacing
+
+
+class Feeder:
+    """Feed a GearWatch with auto-advancing timestamps."""
+
+    def __init__(self, gw, dt=DT):
+        self.gw, self.dt, self.t = gw, dt, 0.0
+
+    def __call__(self, rpm, spd, n=1):
+        out = None
+        for _ in range(n):
+            self.t += self.dt
+            out = self.gw.feed(rpm, spd, self.t)
+        return out
+
+
+for gear_n, c in enumerate(CONSTANTS, start=1):
+    f2 = Feeder(GearWatch(CONSTANTS, TOL))
+    shown = f2(c * 50.0, 50.0, n=3)        # ~0.64 s of steady driving
+    ok(f"gear: exact constant reads gear {gear_n}", shown == gear_n,
+       f"got {shown}")
+
+noman = (CONSTANTS[0] + CONSTANTS[1]) / 2   # 81.7, between 1st and 2nd bands
+ok("gear: ratio in no-man's-land reads neutral",
+   Feeder(GearWatch(CONSTANTS, TOL))(noman * 50.0, 50.0, n=4) == 0)
+ok("gear: below MIN_SPEED reads neutral",
+   Feeder(GearWatch(CONSTANTS, TOL))(3000.0, MIN_SPEED - 1, n=4) == 0)
+ok("gear: engine off reads neutral instantly",
+   Feeder(GearWatch(CONSTANTS, TOL))(0.0, 40.0) == 0)
+
+fd = Feeder(GearWatch(CONSTANTS, TOL))
+fd(CONSTANTS[2] * 40, 40.0, n=3)          # 3rd confirmed
+blip = fd(CONSTANTS[1] * 40, 40.0)        # one 2nd-gear-shaped sample
+ok("gear: single blip does not change the readout", blip == 3, f"got {blip}")
+ok("gear: 0.35s of steady agreement does change it",
+   fd(CONSTANTS[1] * 40, 40.0, n=2) == 2)
+one_out = fd(noman * 40.0, 40.0)          # single out-of-band outlier
+ok("gear: one out-of-band sample does not drop the readout (hysteresis)",
+   one_out == 2, f"got {one_out}")
+ok("gear: 0.35s out of band does drop it",
+   fd(noman * 40.0, 40.0, n=2) == 0)
+fd(CONSTANTS[3] * 60, 60.0, n=3)          # 4th confirmed
+ok("gear: engine cut drops a confirmed gear with no dwell",
+   fd(0.0, 60.0) == 0)
+
+fs = Feeder(GearWatch(CONSTANTS, TOL))
+fs(CONSTANTS[5] * 60, 60.0, n=3)          # cruising 6th
+got = [fs(CONSTANTS[2] * 0.96 * 60, 60.0), fs(CONSTANTS[2] * 1.04 * 60, 60.0)]
+ok("gear: an unsteady sweep through a band never confirms it",
+   3 not in got, f"got {got}")
+
+# QA's regression: the guards must NOT rescale with poll rate (they are
+# time-based for exactly this reason — the read-loop fix made the live rate
+# unknown). 25 Hz clutch-in braking stop from 50 km/h in 3rd: rpm decays
+# 800 rpm/s to idle, speed bleeds 3.6 km/h/s; the ratio sweeps down through
+# 5th's and 6th's bands on its way. Per-sample guards flashed 4-5-6 here.
+gw25 = GearWatch(CONSTANTS, TOL)
+t25 = 0.0
+seen_drive = set()
+for _ in range(25):                        # one settled second in 3rd
+    t25 += 0.04
+    seen_drive.add(gw25.feed(CONSTANTS[2] * 50.0, 50.0, t25))
+ok("gear @25Hz: 3rd confirms while actually driving", 3 in seen_drive,
+   f"saw {sorted(seen_drive)}")
+rpm25, spd25 = CONSTANTS[2] * 50.0, 50.0
+seen_brake = set()
+for _ in range(250):                       # ten seconds of braking to idle
+    t25 += 0.04
+    rpm25 = max(800.0, rpm25 - 800.0 * 0.04)
+    spd25 = max(0.0, spd25 - 3.6 * 0.04)
+    seen_brake.add(gw25.feed(rpm25, spd25, t25))
+ok("gear @25Hz: clutch-in braking never flashes a phantom gear",
+   seen_brake <= {3, 0}, f"saw {sorted(seen_brake)}")
+
+# --- the real drive: Kris's log asserts its own story back ------------------
+
+import csv as _csv
+rows = []
+with open(DRIVE, newline="") as f:
+    for row in _csv.DictReader(f):
+        try:
+            rows.append((float(row["t_s"]), float(row["rpm"]),
+                         float(row["speed_kmh"])))
+        except (KeyError, ValueError):
+            continue
+ok("drive_01: log loads", len(rows) > 500, f"{len(rows)} rows")
+
+gw = GearWatch(CONSTANTS, TOL)
+trace = []                                 # (t, rpm, shown)
+for t, rpm, spd in rows:
+    shown = gw.feed(rpm, spd, t)
+    trace.append((t, rpm, shown))
+    if rpm == 0.0 and shown != 0:
+        ok("drive_01: engine off never shows a gear", False, f"t={t}")
+        break
+else:
+    ok("drive_01: engine off never shows a gear", True)
+
+seen = {g for _t, _r, g in trace if g}
+ok("drive_01: all six gears recovered", seen == {1, 2, 3, 4, 5, 6},
+   f"saw {sorted(seen)}")
+
+first = {}
+for i, (_t, _r, g_) in enumerate(trace):
+    if g_ and g_ not in first:
+        first[g_] = i
+ok("drive_01: gears first appear in driving order 1..6",
+   [k for k, _v in sorted(first.items(), key=lambda kv: kv[1])] ==
+   [1, 2, 3, 4, 5, 6],
+   f"{sorted(first.items(), key=lambda kv: kv[1])}")
+
+pos = first[6]
+descend_ok = True
+detail = ""
+for want in (5, 4, 3, 2, 1):
+    nxt = next((i for i in range(pos + 1, len(trace))
+                if trace[i][2] == want), None)
+    if nxt is None:
+        descend_ok, detail = False, f"no {want} after index {pos}"
+        break
+    pos = nxt
+ok("drive_01: sequential downshift 5-4-3-2-1 recovered", descend_ok, detail)
+
+pull = [(t, r, g_) for t, r, g_ in trace if r > 6500]
+pull_gears = {g_ for _t, _r, g_ in pull}
+ok("drive_01: the redline pull reads 1st gear and nothing else",
+   pull_gears <= {0, 1} and sum(1 for *_x, g_ in pull if g_ == 1) >= 5,
+   f"{len(pull)} samples >6500rpm, gears {sorted(pull_gears)}")
+
+changes = [g_ for i, (_t, _r, g_) in enumerate(trace)
+           if g_ and (i == 0 or trace[i - 1][2] != g_)]
+ok("drive_01: the readout tells the drive's exact story, no phantoms",
+   changes == [1, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1],
+   f"engagements: {changes}")
+
+# --- packer: the real SimHub contract ----------------------------------------
+
+with open(os.path.join(HERE, "feed_layout.json"), encoding="utf-8") as f:
+    LAYOUT = json.load(f)
+
+ENGINE_CAL = {"max_gears": 6, "max_rpm": 8000.0, "fuel_tank_l": 54.0}
+pk = Packer(LAYOUT, cal=ENGINE_CAL)
+ok("packer: struct packs to the contract's exact 101 bytes",
+   pk.size == 101, f"{pk.size}")
+
+snap = {"pids": {0x0C: 4321.0, 0x0D: 88.0, 0x11: 42.0, 0x04: 30.0,
+                 0x05: 90.0, 0x5C: 104.0, 0x2F: 62.0, 0x33: 101.0,
+                 0x42: 13.98},
+        "gear": 4, "true_speed_kmh": 88.0 * 0.938}
+RT = {"emitter_id": 0xDEADBEEF, "session_id": 42, "counter": 7,
+      "session_time": 1.5, "session_running": 1, "is_replay": 0}
+blob = pk.pack(snap, RT)
+ok("packer: packet is exactly struct-sized", len(blob) == pk.size)
+ok("packer: signatures open the packet, little-endian",
+   blob[:8] == bytes.fromhex("03399651e70e3f8a"), blob[:8].hex())
+back = pk.unpack(blob)
+ok("packer: EngineRpm survives the round trip",
+   abs(back["EngineRpm"] - 4321.0) < 0.5, f"{back['EngineRpm']}")
+ok("packer: Gear is the string '4'", back["Gear"] == "4",
+   f"{back['Gear']!r}")
+ok("packer: PacketsCounter lands in the header",
+   back["PacketsCounter"] == 7)
+ok("packer: SpeedKmh is true speed, not raw OBD speed",
+   abs(back["SpeedKmh"] - 88.0 * 0.938) < 0.01, f"{back['SpeedKmh']}")
+ok("packer: Throttle rescaled to SimHub's 0-1",
+   abs(back["Throttle"] - 0.42) < 0.001, f"{back['Throttle']}")
+ok("packer: Fuel converted percent -> liters",
+   abs(back["Fuel"] - 0.62 * 54.0) < 0.05, f"{back['Fuel']}")
+ok("packer: MaxFuel/MaxGears/MaxRpm ride from calibration",
+   back["MaxFuel"] == 54.0 and back["MaxGears"] == 6
+   and back["EngineMaxRpm"] == 8000.0)
+ok("packer: engine running flags set while driving",
+   back["EngineStarted"] == 1 and back["EngineIgnitionOn"] == 1)
+ok("packer: session header carried",
+   back["EmitterInstanceId"] == 0xDEADBEEF and back["SessionId"] == 42
+   and back["IsReplay"] == 0 and back["IsSessionRunning"] == 1
+   and abs(back["SessionTimeSeconds"] - 1.5) < 1e-9)
+
+off_snap = {"pids": {0x0C: 0.0, 0x0D: 0.0}, "gear": 0,
+            "true_speed_kmh": 0.0}
+off = pk.unpack(pk.pack(off_snap, RT))
+ok("packer: Auto-Stop reads engine off, gear N, ignition still on",
+   off["EngineStarted"] == 0 and off["Gear"] == "N"
+   and off["EngineIgnitionOn"] == 1,
+   f"started={off['EngineStarted']} gear={off['Gear']!r}")
+
+tiny = Packer({"endian": "little",
+               "header": [{"name": "m", "type": "u16", "value": 0x0102}],
+               "fields": []})
+ok("packer: little-endian on the wire",
+   tiny.pack({"pids": {}, "gear": 0, "true_speed_kmh": 0}, {}) ==
+   b"\x02\x01")
+
+# --- interpolating state ------------------------------------------------------
+
+st = CarState(GearWatch(CONSTANTS, TOL), speed_factor=0.938)
+t0 = time.monotonic()
+st.update({0x0C: 2000.0, 0x0D: 50.0, 0x05: 90.0}, t0)
+st.update({0x0C: 3000.0, 0x0D: 60.0, 0x05: 91.0}, t0 + 0.2)
+st.poll_period = 0.1                       # render 0.1s back from "now"
+mid = st.snapshot(t0 + 0.2)                # render_t = t0+0.1 = halfway
+ok("state: rpm interpolates midway between samples",
+   2400.0 < mid["pids"][0x0C] < 2600.0, f"{mid['pids'][0x0C]}")
+late = st.snapshot(t0 + 1.0)               # past newest sample, not yet stale
+ok("state: beyond newest sample the needle holds, never extrapolates",
+   late["pids"][0x0C] == 3000.0, f"{late['pids'][0x0C]}")
+ok("state: slow tier never interpolates (coolant is last-known, full stop)",
+   mid["pids"][0x05] == 91.0, f"{mid['pids'][0x05]}")
+ok("state: true speed = raw x tire factor",
+   abs(mid["true_speed_kmh"] - mid["pids"][0x0D] * 0.938) < 1e-9)
+gone = st.snapshot(t0 + 3.5)               # STALE_S exceeded: car left the call
+ok("state: a silent car goes honestly dark, not frozen mid-rev",
+   gone["pids"] == {} and gone["gear"] == 0
+   and gone["true_speed_kmh"] == 0.0, f"{gone}")
+
+# Fast replay: wall time is compressed but the gear judge must run on DATA
+# time — at --speed 25 a wall-clock dwell would judge a different drive.
+stf = CarState(GearWatch(CONSTANTS, TOL), speed_factor=1.0)
+w0 = time.monotonic()
+for i in range(4):
+    stf.update({0x0C: CONSTANTS[2] * 50.0, 0x0D: 50.0},
+               w0 + i * 0.01, gear_t=i * 0.213)
+ok("state: replay gear judgment runs on data time, not wall time",
+   stf.gear == 3, f"got {stf.gear}")
+
+# --- units ---------------------------------------------------------------------
+
+ok("units: calibration default honored",
+   display_units({"units": {"display": "imperial"}}) == "imperial")
+ok("units: override wins",
+   display_units({"units": {"display": "imperial"}}, "metric") == "metric")
+ok("units: missing block means metric", display_units({}) == "metric")
+ok("units: 100 km/h is 62 mph", fmt_speed(100.0, "imperial").strip()
+   == "62 mph", fmt_speed(100.0, "imperial"))
+ok("units: 90 C is 194 F", fmt_temp(90.0, "imperial") == "194F",
+   fmt_temp(90.0, "imperial"))
+
+# --- decode + run log ------------------------------------------------------------
+
+dec = decode_sample({0x0C: b"\x1a\xf8", 0x0D: b"\x58", 0xEE: b"\x00"})
+ok("decode: rpm formula", abs(dec[0x0C] - 0x1AF8 / 4.0) < 0.01)
+ok("decode: unknown PIDs are dropped, not fatal", 0xEE not in dec)
+
+with tempfile.TemporaryDirectory() as td:
+    rl = RunLog(td)
+    rl.row(1.234, 3, {0x0C: 3000.0, 0x0D: 70.0})
+    rl.close()
+    with open(rl.path) as f:
+        lines = f.read().splitlines()
+    ok("runlog: header + one row", len(lines) == 2, f"{lines}")
+    ok("runlog: row carries t, gear, rpm",
+       lines[1].startswith("1.234,3,3000.0,70.0,"), lines[1])
+
+# --- end to end against the fake car (needs pyserial) -----------------------------
+
+try:
+    import serial  # noqa: F401
+    HAVE_SERIAL = True
+except ImportError:
+    HAVE_SERIAL = False
+    print("SKIP  e2e fake-car leg (pyserial not installed here — the leg "
+          "runs in CI-of-one on the Windows side)")
+
+if HAVE_SERIAL:
+    from obd_probe import Elm, get_supported_pids, adapter_init
+    from obd_feed import query_batch, autotune_digit
+
+    port, _th = fake_car.serve_background()
+    elm = Elm(f"socket://127.0.0.1:{port}", timeout=4.0)
+    ident = adapter_init(elm)
+    ok("e2e: fake adapter identifies", "fake car" in ident, ident)
+    supported = get_supported_pids(elm)
+    ok("e2e: supported-PID walk finds the whole fake inventory",
+       supported >= set(fake_car.SUPPORTED),
+       f"missing {set(fake_car.SUPPORTED) - supported}")
+    sched = Scheduler(supported)
+    pids = sched.next_pids()
+    res, resp = query_batch(elm, pids, None)
+    ok("e2e: 6-PID batch answered complete via ISO-TP multi-frame",
+       all(p in res for p in pids), f"asked {pids}, got {sorted(res)}")
+    res1, _ = query_batch(elm, pids, 1)
+    ok("e2e: response-count digit variant also parses complete",
+       all(p in res1 for p in pids), f"got {sorted(res1)}")
+    digit, hz = autotune_digit(elm, pids, seconds=0.3)
+    ok("e2e: auto-tune completes and picks something sane",
+       hz > 0, f"digit={digit} hz={hz}")
+    elm.close()
+
+# --- end to end: sender + receiver over real UDP -----------------------------------
+
+rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+rx.bind(("127.0.0.1", 0))
+rx.settimeout(2.0)
+rx_port = rx.getsockname()[1]
+
+st2 = CarState(GearWatch(CONSTANTS, TOL), speed_factor=1.0)
+now = time.monotonic()
+st2.update({0x0C: 3000.0, 0x0D: 69.0, 0x11: 20.0}, now - 0.1)
+st2.update({0x0C: 3100.0, 0x0D: 71.0, 0x11: 22.0}, now)
+snd = Sender(st2, pk, "127.0.0.1", rx_port, hz=120.0, is_replay=True)
+snd.start()
+pkts = []
+try:
+    while len(pkts) < 8:
+        pkts.append(rx.recvfrom(4096)[0])
+except socket.timeout:
+    pass
+snd.stop.set()
+rx.close()
+ok("udp: packets arrive", len(pkts) >= 8, f"{len(pkts)} packets")
+if pkts:
+    d0, d1 = pk.unpack(pkts[0]), pk.unpack(pkts[-1])
+    ok("udp: payload decodes to live rpm",
+       2900.0 <= d0["EngineRpm"] <= 3100.0, f"{d0['EngineRpm']}")
+    ok("udp: packet counter increments and never resets",
+       d1["PacketsCounter"] > d0["PacketsCounter"] >= 1,
+       f"{d0['PacketsCounter']} -> {d1['PacketsCounter']}")
+    ok("udp: emitter id is non-zero and stable across packets",
+       d0["EmitterInstanceId"] == d1["EmitterInstanceId"] != 0)
+    ok("udp: session time advances",
+       d1["SessionTimeSeconds"] > d0["SessionTimeSeconds"] >= 0.0)
+    ok("udp: replay mode flagged honestly", d0["IsReplay"] == 1)
+    ok("udp: gear rides along as text", d0["Gear"] in ("N", "3"),
+       f"{d0['Gear']!r}")
+
+# ---------------------------------------------------------------------------------
+
+print()
+if FAILED:
+    print(f"{len(FAILED)} FAILED: {FAILED}")
+    sys.exit(1)
+print("all tests passed")

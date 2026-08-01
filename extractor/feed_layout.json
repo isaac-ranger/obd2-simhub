@@ -1,0 +1,43 @@
+{
+  "_status": "LIVE CONTRACT - transcribed field-for-field from SimHub's own generated sender (extractor/demo_code_01.cs, contributed in PR #2). Pack=1, little-endian, 101 bytes. Do NOT reorder or retype fields here without regenerating the definition in SimHub and bumping LayoutMajorVersion there; the signatures below are how SimHub decides whether to trust the packet.",
+  "endian": "little",
+  "unique_id": "9a62309a-8a8d-4ad1-b711-637361b844a8",
+  "simdef_path": "simdef/obd2-simhub.simdef",
+  "expected_packet_length": 101,
+  "udp": {
+    "host": "127.0.0.1",
+    "port": 35353
+  },
+  "header": [
+    { "name": "GameSignature", "type": "u32", "value": 1368799491 },
+    { "name": "TelemetrySignature", "type": "u32", "value": 2319388391 },
+    { "name": "LayoutMajorVersion", "type": "u16", "value": 1 },
+    { "name": "LayoutMinorVersion", "type": "u16", "value": 0 },
+    { "name": "EmitterInstanceId", "type": "u64", "source": "runtime:emitter_id" },
+    { "name": "PacketId", "type": "u8", "value": 0 },
+    { "name": "PacketsCounter", "type": "u64", "source": "runtime:counter" },
+    { "name": "IsSessionRunning", "type": "u8", "source": "runtime:session_running" },
+    { "name": "IsSessionPaused", "type": "u8", "value": 0 },
+    { "name": "SessionId", "type": "u64", "source": "runtime:session_id" },
+    { "name": "IsReplay", "type": "u8", "source": "runtime:is_replay" },
+    { "name": "IsUserInControl", "type": "u8", "value": 1 },
+    { "name": "IsAIInControl", "type": "u8", "value": 0 },
+    { "name": "IsSpectator", "type": "u8", "value": 0 },
+    { "name": "SessionTimeSeconds", "type": "f64", "source": "runtime:session_time" },
+    { "name": "PhysicsDiscontinuityCounter", "type": "u32", "value": 0 }
+  ],
+  "fields": [
+    { "name": "SpeedKmh", "type": "f32", "source": "derived:true_speed_kmh", "_note": "true road speed = OBD speed x active tire set's speed_factor" },
+    { "name": "EngineIgnitionOn", "type": "u8", "source": "derived:ignition_on" },
+    { "name": "EngineStarted", "type": "u8", "source": "derived:engine_started" },
+    { "name": "EngineRpm", "type": "f32", "source": "pid:0C" },
+    { "name": "EngineMaxRpm", "type": "f32", "source": "cal:max_rpm" },
+    { "name": "Throttle", "type": "f32", "source": "derived:throttle_01", "_note": "SimHub wants 0-1, the PID speaks 0-100" },
+    { "name": "Gear", "type": "str8", "source": "derived:gear_text", "_note": "UTF8, NUL-terminated, 8 bytes: N or 1..6 (R never - a learned-ratio gearbox cannot see reverse)" },
+    { "name": "MaxGears", "type": "i32", "source": "cal:max_gears" },
+    { "name": "Fuel", "type": "f32", "source": "derived:fuel_liters", "_note": "PID 2F gives percent; liters = pct/100 x calibration engine.fuel_tank_l" },
+    { "name": "MaxFuel", "type": "f32", "source": "cal:fuel_tank_l" },
+    { "name": "OilTemperature", "type": "f32", "source": "pid:5C" },
+    { "name": "WaterTemperature", "type": "f32", "source": "pid:05" }
+  ]
+}
