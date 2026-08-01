@@ -25,7 +25,7 @@ RPM/speed/throttle exactly as they would in a game.
 | Phase | What | State |
 |-------|------|-------|
 | 1 | **`probe/obd_probe.py`** — measure what *your* car + adapter can actually deliver | ✅ ready — [first real-car run in](#phase-1-results--2025-718-cayman-gts-40-982) |
-| 2 | **Extractor** — poll loop + SimHub UDP feed, built around the probe's findings | design settled on measured numbers; build next |
+| 2 | **`extractor/obd_feed.py`** — poll loop + gear readout + 60 Hz SimHub UDP feed | ✅ built & tested — [run it](#phase-2--run-the-extractor), including against a recorded drive. Awaiting one two-minute favor: [the SimHub contract](#the-simhub-contract-the-two-minute-favor) |
 
 Phase 1 exists because the design hinges on three facts that vary per car:
 which protocol the car speaks (CAN vs. pre-2008 buses are wildly different in
@@ -123,9 +123,20 @@ datasheet counts *responses*, and one ECU answering a 6-PID batch sends one
 message — but that message spans three CAN frames, and if the chip counts
 received lines the right digit is `3`, not `1`. (A too-large digit is a no-op —
 the timer runs out exactly as with no digit; the datasheet warns a too-small
-one can cut off the transfer.) Phase 2 tries `1` and `3`, verifies the reply is
-complete, and keeps whichever moves the number. It is the first optimization
-phase 2 gets, and the one most likely to move 5.0 Hz upward.
+one can cut off the transfer.) The extractor's startup auto-tune now runs this
+experiment on the live car and keeps whichever digit moves the number.
+
+**Confession (found during phase 2, 2026-07-31): the floor was partly ours.**
+The probe's serial read loop waited for data in 200 ms gulps — so no matter
+how quickly the car answered, a request could never complete faster than
+5.0/s. That suspiciously round "5.0 Hz at 1, 3 AND 6 PIDs" was the sound of
+our own read timer, not the ECU's round-trip. (It took a fake car that
+answers in microseconds still "measuring" 5.0 Hz to expose it. The fake then
+did 8,900 requests/s.) Fixed — probe and extractor now return the moment the
+adapter finishes talking. The measured numbers above stand as what phase 1
+actually delivered, but the real ceiling of this car is **unmeasured and
+higher**; the extractor's auto-tune will find it on the next drive. Gauge
+design still assumes 5 Hz and treats anything better as a gift.
 
 ## Phase 2 — the extractor (design)
 
@@ -189,6 +200,65 @@ Design below is now settled against the measured numbers above:
     spikes whose centers are the gearbox as the ECU actually reports it —
     measured off the car, no spec sheet involved. The tool's job is to be
     boring; the drive's job is to be a drive.
+
+## Phase 2 — run the extractor
+
+Everything above, built. `git pull`, then:
+
+```
+py extractor\obd_feed.py --port COM3
+```
+
+That is the whole thing: batched 6-PID polling (3 fast + rotating slow
+slots), the response-count auto-tune on startup, live gear derived from your
+own learned constants, true road speed via the active tire set, and a 60 Hz
+UDP feed with RPM/speed interpolated between samples — a needle that sweeps
+instead of stepping. Every run also logs itself to `runs/*.csv` as a side
+effect, so every errand is free calibration data.
+
+No car handy? Feed it your own recorded drive and watch the pipeline call
+your gears back at you:
+
+```
+py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
+```
+
+(The test suite does exactly this — `python extractor/test_feed.py` replays
+your actual drive and asserts the readout tells the same story you told us:
+1-2-3-4-5-6, back down sequentially, and a 1st-gear pull to 7,622 rpm. Your
+commute is now a regression test. `runs/` output, units, and everything else
+are covered there too.)
+
+**Units:** `calibration.json` now has `"units": {"display": "imperial"}` —
+console output in mph and °F, as demanded by residents of countries that
+have been to the Moon. The wire feed and CSV logs stay metric/SI because
+SimHub and arithmetic prefer it; dashboards convert at the glass, where
+conversion belongs. `--units metric` overrides per run if a passenger
+objects.
+
+### The SimHub contract (the two-minute favor)
+
+The one piece that cannot be built from this side of the screen: SimHub's
+External Sim Integration generates its packet-identification constants
+inside the SimHub UI, and nobody has published the format (we looked;
+GitHub-wide, zero examples — this feature is that new). So, once, on the
+SimHub PC:
+
+1. Confirm SimHub ≥ **9.11.5** (the feature is beta and arrived there).
+2. Settings → Global → enable **game definition authoring tools**.
+3. In the new editor: create a definition — name it, give it a unique ID,
+   and declare exactly these fields (SimHub's docs say never declare what
+   you can't provide; this list is what your car provides):
+   `rpm, speed, gear, throttle, engine load, coolant temp, oil temp,
+   fuel level, barometric pressure, battery voltage`.
+4. Click **copy demo code (C#)** and send back the paste, plus the
+   definition's default UDP port.
+
+The constants from that paste get transcribed into
+`extractor/feed_layout.json` (the packer is config-driven precisely so this
+is a JSON edit, not a code change), and then SimHub's Telemetry Receiver
+Tester should show live values. That paste is the last unknown between here
+and a real tach needle on your overlay.
 
 ### Phase 2 research notes (2026-07-30)
 
@@ -255,7 +325,22 @@ anyone's estimate, including this file's.
 
 ## Development without a car
 
-The probe is developed and tested against
+**Phase 2 way:** the repo now ships its own fake car, because the emulator
+below cannot answer the one thing the feed always sends (a batched multi-PID
+request):
+
+```
+python extractor/fake_car.py --tcp 35000        # terminal 1
+python extractor/obd_feed.py --port socket://127.0.0.1:35000   # terminal 2
+```
+
+It answers 6-PID batches the way the real 982 does — one ISO-TP reply
+spanning three CAN frames — and it drives itself up and down through all six
+gears using the learned constants from `calibration.json`, so the gear
+readout has something honest to chase. It is a gear-shaped signal generator,
+not a physics model; its idea of a downshift would not pass tech inspection.
+
+**Phase 1 way:** the probe was originally developed against
 [ELM327-emulator](https://github.com/Ircama/ELM327-emulator):
 
 ```

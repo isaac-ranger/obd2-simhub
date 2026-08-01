@@ -102,6 +102,13 @@ class Elm:
         self.ser = serial.serial_for_url(port, baudrate=baud, timeout=0.2)
         self.timeout = timeout
         self.log = []
+        # Swallow any banner/prompt already in flight before we speak. A
+        # stale '>' would otherwise terminate the first command's read
+        # early, and every reply after that answers the previous question.
+        settle = time.perf_counter() + 0.3
+        while time.perf_counter() < settle:
+            if not self.ser.read(getattr(self.ser, "in_waiting", 0) or 1):
+                break
 
     def close(self):
         try:
@@ -116,10 +123,18 @@ class Elm:
         self.ser.write(command.encode("ascii") + b"\r")
         self.ser.flush()
         buf = bytearray()
+        # read(1) returns the moment a byte arrives; in_waiting drains the
+        # rest. The old read(256) waited out its full 0.2 s timeout on every
+        # pass (256 bytes never arrive from an ELM), which silently floored
+        # the whole phase 1 rate measurement at 5 requests/s. The adapter
+        # was never the (only) bottleneck — our read quantum was.
         while time.perf_counter() < deadline:
-            chunk = self.ser.read(256)
+            chunk = self.ser.read(1)
             if chunk:
                 buf += chunk
+                waiting = getattr(self.ser, "in_waiting", 0)
+                if waiting:
+                    buf += self.ser.read(waiting)
                 if PROMPT in buf:
                     break
         else:
