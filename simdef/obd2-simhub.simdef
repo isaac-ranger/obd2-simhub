@@ -1,0 +1,79 @@
+{
+  "TelemetryBehaviour": {
+    "GameFamily": 1,
+    "DefaultMaxSpeed": 40.0,
+    "HasRumbleStripsContactSurface": false,
+    "AllowGimbleLockSanitizer": false
+  },
+  "TelemetryDefinition": {
+    "LayoutMajorVersion": 1,
+    "LayoutMinorVersion": 0,
+    "ProtocolVersion": 1,
+    "Fields": [
+      {
+        "FieldType": "SpeedKmh",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "EngineIgnitionOn",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "EngineStarted",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "EngineRpm",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "EngineMaxRpm",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "Throttle",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "Gear",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "MaxGears",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "Fuel",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "MaxFuel",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "OilTemperature",
+        "TypeName": "StandardField"
+      },
+      {
+        "FieldType": "WaterTemperature",
+        "TypeName": "StandardField"
+      }
+    ]
+  },
+  "GameSignature": 1368799491,
+  "TelemetrySignature": 2319388391,
+  "Name": "OBD2 SimHub",
+  "UniqueId": "9a62309a-8a8d-4ad1-b711-637361b844a8",
+  "DefaultUDPPort": 35353,
+  "DetectionProcesses": [
+    {
+      "ProcessName": "Obd2SimHub",
+      "FileChecks": []
+    }
+  ],
+  "SimStartCommand": null,
+  "SimStartArguments": null,
+  "UseExtractorProcess": false,
+  "ExtractorProcessCommand": "Obd2SimHub.exe",
+  "IconPath": "obd2-simhub.jpg"
+}
