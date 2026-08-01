@@ -138,6 +138,55 @@ w2 = "\n".join(warmup_report(R2))
 ok("drive_02: the oil-lag note fires (99C coolant, 71C oil)",
    "not an oil gauge" in w2, w2)
 
+# --- damaged and hostile logs (QA pass 2026-07-31 findings) ---------------
+
+# a run killed in the car: final line cut mid-write
+tpath = write_log("t_s,gear,rpm,speed_kmh,throttle_pct",
+                  [(0.0, 1, 2000.0, 15, 10), (0.2, 1, 2010.0, 15, 10),
+                   (0.4, 1, 2020.0, 16, 10)])
+with open(tpath, "a") as f:
+    f.write("0.6")                          # t_s and nothing else
+tr = load_rows(tpath)
+ok("damaged: truncated final line is dropped, not a crash",
+   len(tr) == 3 and shift_report(tr) is not None, f"{len(tr)} rows")
+os.unlink(tpath)
+
+# a blank gear cell mid-file (hand edit, flaky write)
+bpath = write_log("t_s,gear,rpm,speed_kmh,throttle_pct",
+                  [(0.0, 1, 2000.0, 15, 10), (0.2, "", 2010.0, 15, 10),
+                   (0.4, 1, 2020.0, 16, 10), (0.6, 1, 2030.0, 16, 10)])
+br = load_rows(bpath)
+ok("damaged: blank mid-file gear cell drops that row only",
+   len(br) == 3 and "\n".join(gear_report(br, CONSTANTS, 7)),
+   f"{len(br)} rows")
+os.unlink(bpath)
+
+# concatenated runs: time goes backwards
+npath = write_log("t_s,gear,rpm,speed_kmh,throttle_pct",
+                  [(0.0, 2, 2400.0, 40, 20), (0.2, 2, 2410.0, 40, 20),
+                   (0.4, 2, 2420.0, 40, 20), (0.1, 2, 2400.0, 40, 20),
+                   (0.3, 2, 2410.0, 40, 20)])
+olines = "\n".join(overview(load_rows(npath), npath))
+ok("hostile: backwards time draws the WARNING, not silent nonsense",
+   "WARNING" in olines and "backwards" in olines, olines)
+os.unlink(npath)
+
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+                       DRIVE2, "--calibration", "/dev/null"],
+                      capture_output=True, text=True)
+ok("hostile: an explicitly named broken calibration refuses loudly",
+   proc.returncode != 0 and "not valid JSON" in proc.stderr,
+   f"rc={proc.returncode} {proc.stderr[-200:]}")
+zpath = os.path.join(tempfile.mkdtemp(), "cal.json")
+with open(zpath, "w") as f:
+    f.write('{"gears": {"rpm_per_kmh": [0.0, 60.4]}}')
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+                       DRIVE2, "--calibration", zpath],
+                      capture_output=True, text=True)
+ok("hostile: zero gear constant refuses with a named message",
+   proc.returncode != 0 and "non-positive" in proc.stderr,
+   proc.stderr[-200:])
+
 # --- CLI end to end -------------------------------------------------------
 proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
                        DRIVE2], capture_output=True, text=True)

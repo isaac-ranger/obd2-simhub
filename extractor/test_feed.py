@@ -258,6 +258,48 @@ ok("display: honest mode never holds",
    snap_h["gear"] == 0 and snap_h["gear_display"] == 0,
    f"{snap_h['gear']} / {snap_h['gear_display']}")
 
+# THE headline promise, pinned end to end: the run log receives the judge's
+# gear, never the display hold. This drives the real poll_replay loop — the
+# actual run_log.row call site — so swapping state.gear for
+# state.gear_display there fails HERE, not in some future drive report.
+from obd_feed import poll_replay
+import types as _types
+
+_mini = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                    newline="")
+_mini.write("t_s,rpm,speed_kmh,throttle_pct\n")
+_t = 0.0
+for _i in range(10):                       # 2nd gear, judge confirms
+    _mini.write(f"{_t:.3f},{CONSTANTS[1] * 40.0:.1f},40,20\n")
+    _t += 0.2
+for _i in range(10):                       # clutch-in coast: honest N rolls
+    _mini.write(f"{_t:.3f},850.0,30,0\n")
+    _t += 0.2
+_mini.close()
+
+_logdir = tempfile.mkdtemp()
+_st = CarState(GearWatch(CONSTANTS, TOL), display_hold=True)
+_rl = RunLog(_logdir)
+_snd = _types.SimpleNamespace(fatal=None, sent=0, errors=0)  # what poll_replay reads
+_args = _types.SimpleNamespace(replay=_mini.name, speed=1000.0,
+                               resolved_units="metric")
+poll_replay(_args, _st, _rl, _snd)
+_rl.close()
+with open(_rl.path, newline="") as _f:
+    _logged = [(float(r["t_s"]), int(r["gear"]))
+               for r in _csv.DictReader(_f)]
+# the judge's symmetric dwell keeps honest 2nd for ~0.35s into the coast;
+# assert the settled window, where honest N and the held dash must differ
+_coast = [g for t, g in _logged if t >= 2.6]
+ok("honest log: replay wrote every sample", len(_logged) == 20,
+   f"{len(_logged)} rows")
+ok("honest log: judge confirmed 2nd before the coast",
+   any(g == 2 for _t2, g in _logged), f"{_logged}")
+ok("honest log: settled coast logs N while the dash holds 2nd",
+   _coast and all(g == 0 for g in _coast) and _st.gear_display == 2,
+   f"coast rows {_coast}, dash {_st.gear_display}")
+os.unlink(_mini.name)
+
 # --- packer: the real SimHub contract ----------------------------------------
 
 with open(os.path.join(HERE, "feed_layout.json"), encoding="utf-8") as f:

@@ -263,8 +263,11 @@ python report.py runs/feed-20260731-204617.csv
 
 Five sections, all auditable from the definitions in the file's docstring:
 cadence and channel coverage; the gear ladder measured **this** drive
-against calibration (your first street drive re-confirmed gears 1–4 within
-0.5%, without knowing it was doing calibration work); shifts — timed clutch
+against calibration (your first street drive re-confirmed gears 2–4 within
+half a percent and gear 1 within 1.5% — the 1st-gear samples sit at
+12–16 km/h, where integer-km/h OBD speed floors the ratio math; from
+16 km/h up, 1st agrees within 0.15% — all without knowing it was doing
+calibration work); shifts — timed clutch
 windows, separated from coasting, including downshifts rev-matched so
 cleanly the judge never saw neutral; warm-up; extremes. Two findings from
 your 2026-07-31 drive it would have handed you on the spot:

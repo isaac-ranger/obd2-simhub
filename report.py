@@ -48,14 +48,21 @@ WARM_OIL_C = 80.0      # oil actually ready (conservative street number)
 
 
 def load_rows(path):
-    """[(dict per row with floats or None)] tolerating both log formats."""
+    """[(dict per row with floats or None)] tolerating both log formats.
+
+    A feed-format row whose gear cell is missing or unparseable is dropped
+    whole: the likeliest cause is a final line cut mid-write when the run
+    was killed in the car, and every gear consumer downstream indexes on
+    that column. Probe-format logs have no gear column and are untouched."""
     rows = []
     try:
         f = open(path, newline="")
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:
-        for raw in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        has_gear = "gear" in (reader.fieldnames or [])
+        for raw in reader:
             row = {}
             for k, v in raw.items():
                 if k is None or v is None or v == "":
@@ -65,14 +72,19 @@ def load_rows(path):
                         row[k] = float(v)
                     except ValueError:
                         row[k] = None
-            if row.get("t_s") is not None:
-                rows.append(row)
+            if row.get("t_s") is None:
+                continue
+            if has_gear and row.get("gear") is None:
+                continue                     # damaged row, not data
+            rows.append(row)
     return rows
 
 
 def fmt_span(seconds):
-    m, s = divmod(int(round(seconds)), 60)
-    return f"{m}:{s:02d} min" if m else f"{s}s"
+    whole = int(round(seconds))
+    sign = "-" if whole < 0 else ""
+    m, s = divmod(abs(whole), 60)
+    return f"{sign}{m}:{s:02d} min" if m else f"{sign}{s}s"
 
 
 # --------------------------------------------------------------------------
@@ -86,6 +98,11 @@ def overview(rows, path):
     dts = sorted(b - a for a, b in zip(t, t[1:]) if b > a)
     lines = [f"log      {os.path.basename(path)}",
              f"samples  {len(rows)} over {fmt_span(span)}"]
+    backwards = sum(1 for a, b in zip(t, t[1:]) if b < a)
+    if backwards:
+        lines.append(f"WARNING  time runs backwards {backwards}x — "
+                     f"concatenated runs? Every duration below is suspect; "
+                     f"split the file at the reset and report each run alone")
     if dts:
         med = dts[len(dts) // 2]
         p95 = dts[int(len(dts) * 0.95)]
@@ -180,10 +197,9 @@ def gear_report(rows, constants, tol_pct):
             lines.append(f"  {g}    {c:>8.1f}      {'—':>7}         "
                          f"  not seen this drive")
     if time_in:
-        total = sum(time_in.values())
         engaged = ", ".join(f"{g}: {fmt_span(time_in[g])}"
                             for g in sorted(time_in) if g > 0)
-        lines.append(f"time in gear   {engaged}")
+        lines.append(f"time in gear   {engaged or '(never engaged)'}")
         if 0 in time_in:
             standing = moving = 0.0
             for g, i0, i1 in gear_stints(rows):
@@ -351,11 +367,16 @@ def main():
 
     rows = load_rows(args.log)
     if len(rows) < 2:
-        sys.exit(f"no usable rows in {args.log} — expected the header "
-                 f"obd_probe.py --log or obd_feed.py's run log writes")
+        sys.exit(f"{len(rows)} usable data row(s) in {args.log} — a report "
+                 f"needs at least 2 (expected columns: the header "
+                 f"obd_probe.py --log or obd_feed.py's run log writes)")
 
     sections = [("DRIVE", overview(rows, args.log))]
     gears = (cal.get("gears", {}) or {}).get("rpm_per_kmh")
+    if gears and not all(isinstance(c, (int, float)) and c > 0 for c in gears):
+        sys.exit(f"{cal_path} gears.rpm_per_kmh contains a non-positive "
+                 f"constant ({gears}) — a gear ratio can't be zero; re-run "
+                 f"probe/learn_gears.py or fix the file by hand")
     if gears:
         tol = float(cal.get("gears", {}).get("tolerance_pct", 7))
         sections.append(("GEARS", gear_report(rows, gears, tol)))

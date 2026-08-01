@@ -316,12 +316,13 @@ class CarState:
             rpm = self._interp(0x0C, render_t)
             speed_raw = self._interp(0x0D, render_t)
             out = {pid: v for pid, (v, _t) in self.values.items()}
+            gear, gear_display = self.gear, self.gear_display
         out[0x0C] = rpm
         out[0x0D] = speed_raw
         return {
             "pids": out,
-            "gear": self.gear,
-            "gear_display": self.gear_display,
+            "gear": gear,
+            "gear_display": gear_display,
             "true_speed_kmh": speed_raw * self.speed_factor,
         }
 
