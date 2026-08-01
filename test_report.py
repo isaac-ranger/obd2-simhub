@@ -171,8 +171,14 @@ ok("hostile: backwards time draws the WARNING, not silent nonsense",
    "WARNING" in olines and "backwards" in olines, olines)
 os.unlink(npath)
 
+# A real file holding real garbage. /dev/null used to stand in for this, but on
+# Windows it is a missing path, not an empty one — so the run failed for the wrong
+# reason and this assertion never fired on Kris's machine.
+bad_cal = os.path.join(tempfile.mkdtemp(), "cal.json")
+with open(bad_cal, "w") as f:
+    f.write("")
 proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
-                       DRIVE2, "--calibration", "/dev/null"],
+                       DRIVE2, "--calibration", bad_cal],
                       capture_output=True, text=True)
 ok("hostile: an explicitly named broken calibration refuses loudly",
    proc.returncode != 0 and "not valid JSON" in proc.stderr,

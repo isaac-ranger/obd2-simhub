@@ -25,6 +25,7 @@ from supervisor import SAMPLE_LINE, Status, FeedProcess, human_duration
 
 REPO = os.path.join(HERE, os.pardir)
 SUP = os.path.join(HERE, "supervisor.py")
+WINDOWS = os.name == "nt"
 
 FAILED = []
 
@@ -102,8 +103,11 @@ def run_supervisor(tmp, stub, extra=(), settle=2.0):
             "--log-dir", os.path.join(tmp, "runs"),
             "--feed", stub,
             "--quiet"] + list(extra)
+    # Windows: a parent cannot deliver SIGINT. The only graceful stop it has is
+    # CTRL_BREAK_EVENT, and that requires the child to own a process group.
+    extra_kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {}
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            universal_newlines=True)
+                            universal_newlines=True, **extra_kw)
     time.sleep(settle)
     return proc, status_path
 
@@ -114,8 +118,14 @@ def read_status(path):
 
 
 def stop(proc):
+    # Ask for the graceful path, not a kill. terminate() would end the supervisor
+    # without running its shutdown — leaving the stub feed it spawned orphaned, and
+    # leaving these four e2e cases testing nothing but that a process can be killed.
     if proc.poll() is None:
-        proc.send_signal(signal.SIGINT)
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGINT)
+        except (ValueError, OSError):
+            proc.terminate()
     try:
         return proc.communicate(timeout=10)[0]
     except subprocess.TimeoutExpired:

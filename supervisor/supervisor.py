@@ -355,6 +355,10 @@ def main():
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
+    if hasattr(signal, "SIGBREAK"):
+        # Windows only. Console ctrl-c already arrives as SIGINT; this is the one
+        # a parent process (a launcher, the tests) can send to ask us to stop.
+        signal.signal(signal.SIGBREAK, on_signal)
 
     print(f"supervisor: watching {' '.join(argv)}")
     print(f"supervisor: status  -> {args.status_file}")
