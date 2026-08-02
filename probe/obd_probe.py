@@ -99,7 +99,20 @@ class Elm:
     def __init__(self, port, baud=115200, timeout=6.0):
         # serial_for_url handles both real ports (COM5, /dev/rfcomm0)
         # and URLs (socket://host:port) with one code path.
-        self.ser = serial.serial_for_url(port, baudrate=baud, timeout=0.2)
+        # write_timeout matters more than it looks: when a Bluetooth adapter
+        # loses power mid-conversation (unplugged from the OBD port), Windows
+        # keeps the COM handle alive and a write to it blocks FOREVER — no
+        # error, no return. The read path is bounded by cmd()'s deadline; the
+        # write path is only bounded by this. A write that times out raises
+        # SerialTimeoutException, which is an OSError, which the poll loop
+        # already counts as a miss — so the 25-miss watchdog can fire. One
+        # honest caveat: on win32 this timeout is enforced by the same COM
+        # driver that just proved it can hang (pyserial hands it to
+        # SetCommTimeouts and waits), so on a truly dead Bluetooth handle it
+        # is a request, not a guarantee. The supervisor's stall-restart is
+        # the layer that does not depend on the driver's cooperation.
+        self.ser = serial.serial_for_url(port, baudrate=baud, timeout=0.2,
+                                         write_timeout=2.0)
         self.timeout = timeout
         self.log = []
         # Swallow any banner/prompt already in flight before we speak. A
@@ -120,8 +133,15 @@ class Elm:
         """Send one command, read until the '>' prompt, return cleaned lines."""
         deadline = time.perf_counter() + (timeout or self.timeout)
         self.ser.reset_input_buffer()
+        # No flush() after this write, deliberately: flush is unbounded on
+        # every transport and write_timeout does not govern it — on win32
+        # (pyserial 3.x) it polls out_waiting in a sleep loop that spins
+        # forever if a dead handle's queue count freezes; on posix it is
+        # tcdrain, which hangs the same way on a dead /dev/rfcomm0. Nothing
+        # buffers writes in userspace on any of our transports, so write()
+        # already handed the bytes to the OS, and the prompt-read below is
+        # the real confirmation they arrived.
         self.ser.write(command.encode("ascii") + b"\r")
-        self.ser.flush()
         buf = bytearray()
         # read(1) returns the moment a byte arrives; in_waiting drains the
         # rest. The old read(256) waited out its full 0.2 s timeout on every

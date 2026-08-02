@@ -296,7 +296,12 @@ stop(proc)
 # --- end to end: alive but silent -------------------------------------------------
 print("\nend to end: running but wedged")
 tmp = tempfile.mkdtemp()
-proc, sp = run_supervisor(tmp, write_stub(tmp, "silent.py", STUB_SILENT), settle=2.5)
+# --stall-restart-seconds 0 is the report-only contract from before the
+# stall-kill existed; this run is also its only coverage. The wedged e2e
+# below kills an identical silence at 2 seconds, so surviving 2.5s here is
+# proof the 0 means "never", not "instantly".
+proc, sp = run_supervisor(tmp, write_stub(tmp, "silent.py", STUB_SILENT),
+                          extra=("--stall-restart-seconds", "0"), settle=2.5)
 s = read_status(sp)
 ok("a live-but-silent feed reads STALLED, not LIVE", s["state"] == "STALLED", s["state"])
 ok("STALLED is not healthy", s["healthy"] is False)
@@ -304,8 +309,9 @@ ok("never-answered is worded differently from went-quiet",
    "not answered yet" in s["summary"], s["summary"])
 ok("and it gives the right advice for that case",
    "ignition" in s["summary"], s["summary"])
-ok("does not kill a process that might still recover",
-   s["detail"]["feed_pid"] is not None)
+ok("stall-restart 0 = report only: the process is watched, never killed",
+   s["detail"]["feed_pid"] is not None and s["detail"]["restarts"] == 0,
+   f"pid {s['detail']['feed_pid']}, {s['detail']['restarts']} restarts")
 stop(proc)
 
 # The other STALLED shape: data flowed, then stopped, process still up.
@@ -321,6 +327,36 @@ ok("it says how long the data has been gone",
 ok("it remembers data did once flow", s["detail"]["samples_seen"] == 3,
    str(s["detail"]["samples_seen"]))
 ok("last_data_at survives the silence", s["detail"]["last_data_at"] is not None)
+stop(proc)
+
+# --- end to end: wedged past the restart budget -----------------------------------
+# The field failure of 2026-08-02: the MX+ lost power mid-drive, Windows kept
+# the COM handle alive, and the feed blocked in a serial write that never
+# returns and never raises. Report-only leaves that state forever — the wedged
+# process owns the dead port, so nothing recovers until something reopens it.
+# Past --stall-restart-seconds the supervisor must be that something.
+print("\nend to end: wedged past the restart budget")
+tmp = tempfile.mkdtemp()
+proc, sp = run_supervisor(tmp, write_stub(tmp, "wedged.py", STUB_GOES_QUIET),
+                          extra=("--stall-restart-seconds", "2"), settle=5.0)
+# The kill itself is deterministic; the RECOVERY is at the mercy of the
+# machine's process-spawn latency (a cold Windows box with an antivirus can
+# spend seconds just starting Python). Poll up to a deadline rather than
+# trusting one fixed settle, so a slow machine proves the same thing a fast
+# one does instead of failing the last assertion.
+deadline = time.time() + 20
+s = read_status(sp)
+while time.time() < deadline and not (
+        s["detail"]["restarts"] >= 1 and s["detail"]["samples_seen"] > 3):
+    time.sleep(0.3)
+    s = read_status(sp)
+ok("a wedged feed is killed and restarted, not watched forever",
+   s["detail"]["restarts"] >= 1, f"{s['detail']['restarts']} restarts")
+ok("the recorded reason is the supervisor's own judgement",
+   "wedged" in ((s["detail"]["last_exit"] or {}).get("reason") or ""),
+   (s["detail"]["last_exit"] or {}).get("reason", "")[:60])
+ok("the fresh run reached data again after the kill",
+   s["detail"]["samples_seen"] > 3, str(s["detail"]["samples_seen"]))
 stop(proc)
 
 # --- the staleness contract -------------------------------------------------------

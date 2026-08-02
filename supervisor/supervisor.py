@@ -32,10 +32,26 @@ the feed to grow a heartbeat channel — no change to obd_feed.py, and the
 signal means "data actually moved," not "the process is still resident."
 A process can be alive and wedged. A printed sample cannot.
 
-Three failures, three responses:
-  - feed exits (25 misses, sender death, crash) -> restart after backoff
-  - feed alive but silent past --stall-seconds  -> report STALLED, keep watching
-  - the adapter was never there                 -> report NO_ADAPTER, keep retrying
+Four failures, four responses:
+  - feed exits (25 misses, sender death, crash)    -> restart after backoff
+  - feed alive but silent past --stall-seconds     -> report STALLED
+  - no data THIS RUN past --stall-restart-seconds  -> kill the feed, restart it
+  - the adapter was never there                    -> report NO_ADAPTER, keep retrying
+
+(Replay runs are exempt from the stall-kill: a replay cannot wedge on a dead
+COM handle, and a long quiet stretch in a recording is silence with a future
+— killing it would restart the replay from the top, forever.)
+
+The stall-restart exists because of a failure the field actually produced
+(2026-08-02, MX+ unplugged mid-drive): the adapter loses power, Windows
+keeps the COM handle alive, and the feed blocks in a serial write that
+never returns and never raises. The 25-miss watchdog counts completed
+failures; a call that never completes cannot be counted. The feed got a
+write timeout the same day, so this path is the second layer — the
+supervisor acting on what its own status file already says. Report-only
+was the original philosophy ("keep watching, it might recover"), and the
+field showed a wedged process holds the dead handle hostage: nothing
+recovers until someone reopens the port, and that someone is here.
 
 The 25-miss exit is the one that matters at an event: it means power-cycle
 the adapter. The supervisor cannot power-cycle it for you, but it retries
@@ -317,6 +333,15 @@ def main():
     ap.add_argument("--stall-seconds", type=float, default=10.0,
                     help="no data for this long, while the feed is still "
                          "running, means STALLED (default: 10)")
+    ap.add_argument("--stall-restart-seconds", type=float, default=45.0,
+                    help="kill and restart the feed if it is still alive "
+                         "after this many seconds without data, counted "
+                         "within the current run — a serial write blocked on "
+                         "a dead handle cannot exit on its own. Keep it "
+                         "comfortably above --stall-seconds so STALLED gets "
+                         "reported before it escalates. Never applies to "
+                         "--replay runs. 0 = report only, never kill "
+                         "(default: 45)")
     ap.add_argument("--backoff-start", type=float, default=2.0)
     ap.add_argument("--backoff-max", type=float, default=60.0)
     ap.add_argument("--healthy-seconds", type=float, default=60.0,
@@ -386,11 +411,27 @@ def main():
                 break
 
             # Watch this run until the child exits or we are told to stop.
+            stall_note = None
             while not stopping.is_set():
                 rc = current.proc.poll()
                 if rc is not None:
                     break
-                since = status.seconds_since_data()
+                # One read of last_data_mono, used for both the age and the
+                # per-run test. The pump thread updates it concurrently; with
+                # two reads, a first sample landing between them would leave
+                # `since` carrying the ancestor's age while the guard saw the
+                # newborn's timestamp — and the kill below would fire on a
+                # run that had just proved itself alive.
+                last_mono = status.last_data_mono
+                since = (round(time.monotonic() - last_mono, 1)
+                         if last_mono is not None else None)
+                if since is not None and last_mono < run_started:
+                    # That data belonged to the previous run. A fresh feed
+                    # must be judged from its own birth, not its ancestor's
+                    # last words — a real reconnect spends ~12 silent seconds
+                    # in adapter reset and autotune, and inheriting stale age
+                    # here would kill every new run at the starting line.
+                    since = None
                 if since is None:
                     # No data yet this run. Give it the stall budget to
                     # connect before calling it anything worse than STARTING.
@@ -401,6 +442,56 @@ def main():
                 else:
                     status.set_state("LIVE")
                 status.write()
+
+                # No data past the restart budget means the process is wedged,
+                # not recovering — typically blocked in a serial write on a
+                # handle whose adapter lost power. It will never exit on its
+                # own, and while it lives it owns the dead port. Reopening the
+                # port is the only cure, and that takes a fresh process.
+                # Replay runs are exempt: they cannot wedge on a dead handle,
+                # and a quiet stretch in a recording ends by itself.
+                stalled_for = (since if since is not None
+                               else time.monotonic() - run_started)
+                if (args.stall_restart_seconds and not replay
+                        and stall_note is None
+                        and status.state == "STALLED"
+                        and stalled_for > args.stall_restart_seconds):
+                    what = (f"no data for {human_duration(stalled_for)}"
+                            if since is not None else
+                            f"no data this run in {human_duration(stalled_for)}")
+                    stall_note = (f"{what} while the process stayed up — "
+                                  f"judged wedged by the supervisor "
+                                  f"(--stall-restart-seconds "
+                                  f"{args.stall_restart_seconds:.0f}); "
+                                  f"restarting")
+                    msg = f"supervisor: {stall_note}"
+                    print(msg, flush=True)
+                    log_file.write(msg + "\n")
+                    log_file.flush()
+                    current.proc.terminate()
+                    try:
+                        current.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        current.proc.kill()
+                        try:
+                            current.proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            # TerminateProcess can fail against a process
+                            # stuck in an uncancelable kernel I/O request —
+                            # the very class of hang this path exists for.
+                            # Say so, rather than letting the log claim a
+                            # restart that never happened. The loop keeps
+                            # reporting STALLED honestly either way, and the
+                            # exit is collected whenever the OS lets go.
+                            msg = ("supervisor: the kill did not take — the "
+                                   "process is stuck in the kernel; still "
+                                   "watching, will collect it when the OS "
+                                   "releases it")
+                            print(msg, flush=True)
+                            log_file.write(msg + "\n")
+                            log_file.flush()
+                    continue  # next poll() collects the exit
+
                 stopping.wait(args.status_interval)
 
             if stopping.is_set():
@@ -408,7 +499,10 @@ def main():
 
             rc = current.proc.wait()
             ran_for = time.monotonic() - run_started
-            reason = current.exit_reason()
+            # A stall-kill leaves the feed no chance to explain itself, and
+            # its last words would be an ordinary sample line — the supervisor
+            # is the one who knows why this run ended.
+            reason = stall_note or current.exit_reason()
             status.last_exit = {"code": rc, "reason": reason}
             status.feed_pid = None
 

@@ -419,12 +419,13 @@ the liveness signal — so it needed no change to `obd_feed.py`, and the signal
 means *data actually moved*, not *the process is still resident*. A process can
 be alive and wedged; a printed sample cannot.
 
-Three failures, three responses:
+Four failures, four responses:
 
 | what happens | what it does |
 |---|---|
 | feed exits (25 misses, sender death, an outright crash) | restarts it after a backoff that resets once a run has been healthy |
-| feed alive but silent past `--stall-seconds` | reports `STALLED`, keeps watching — it may come back on its own |
+| feed alive but silent past `--stall-seconds` | reports `STALLED` — it may still come back on its own |
+| feed alive but no data this run for `--stall-restart-seconds` (default 45) | judges the process wedged, kills it, restarts it — a serial write blocked on a dead Bluetooth handle never exits by itself (field-found 2026-08-02, MX+ unplugged mid-drive). `0` restores report-only |
 | adapter was never there | reports `NO_ADAPTER`, keeps retrying forever |
 
 That last row is the one that matters in pre-grid. The supervisor can't
