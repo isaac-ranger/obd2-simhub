@@ -192,18 +192,28 @@ def serve(port, car=None, once=False, quiet=False):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port))
     srv.listen(1)
+    # Short timeout so Ctrl-C can interrupt accept()/recv() on Windows,
+    # where SIGINT does not wake a blocking socket call.
+    srv.settimeout(0.5)
     if not quiet:
         print(f"fake car on socket://127.0.0.1:{srv.getsockname()[1]}  "
               f"(drive loop {car.total:.0f}s; Ctrl-C to stop)")
     try:
         while True:
-            conn, _addr = srv.accept()
+            try:
+                conn, _addr = srv.accept()
+            except socket.timeout:
+                continue
             front = ElmFront(car)
             buf = b""
             try:
+                conn.settimeout(0.5)
                 conn.sendall(b">")
                 while True:
-                    chunk = conn.recv(256)
+                    try:
+                        chunk = conn.recv(256)
+                    except socket.timeout:
+                        continue
                     if not chunk:
                         break
                     buf += chunk
