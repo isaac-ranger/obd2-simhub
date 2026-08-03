@@ -83,7 +83,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -105,35 +105,23 @@ NO_ADAPTER_HINTS = (
 )
 
 
-def utc_now():
-    return datetime.now(timezone.utc)
+def now():
+    """Local wall-clock time, timezone-aware.
 
-
-def build_id():
-    """Which commit is this, read without shelling out to git.
-
-    A field report that does not say what it was running costs a round trip
-    to a person in a driveway. Read .git/HEAD by hand: `git` may not be on
-    PATH under whatever launched us, and a subprocess at startup is a new
-    way to fail on the machine we are trying to be reliable on. Returns
-    "unknown" for a copy with no .git — a zip download is a legitimate way
-    to run this, and it should say so rather than lie.
+    Local rather than UTC on purpose: everyone who reads these timestamps is
+    standing near the car, comparing them against the dash clock or against a
+    run log named in local time. UTC made that a subtraction, and made the
+    feed log and the supervisor log for one drive look seven hours apart.
+    The offset travels in the string, so a log mailed across timezones is
+    still unambiguous, and `updated_unix` remains the machine-side anchor
+    for anything comparing instants.
     """
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    try:
-        with open(os.path.join(root, ".git", "HEAD"), encoding="utf-8") as f:
-            head = f.read().strip()
-        if head.startswith("ref: "):
-            ref = head[5:].strip()
-            with open(os.path.join(root, ".git", ref), encoding="utf-8") as f:
-                return f.read().strip()[:12]
-        return head[:12]                      # detached HEAD
-    except OSError:
-        return "unknown"
+    return datetime.now().astimezone()
 
 
 def iso(dt):
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """ISO-8601 with the local offset: 2026-08-03T09:34:29-07:00."""
+    return dt.isoformat(timespec="seconds")
 
 
 def human_duration(seconds):
@@ -168,9 +156,9 @@ class Status:
         # makes every "it didn't fire" report ambiguous between a bug and a
         # setting — which is exactly the round trip this exists to prevent.
         self.settings = settings or {}
-        self.started = utc_now()
+        self.started = now()
         self.state = "STARTING"
-        self.state_since = utc_now()
+        self.state_since = now()
         self.last_data = None          # wall clock of last sample line
         self.last_data_mono = None     # monotonic, for the staleness maths
         self.restarts = 0
@@ -182,10 +170,10 @@ class Status:
     def set_state(self, state):
         if state != self.state:
             self.state = state
-            self.state_since = utc_now()
+            self.state_since = now()
 
     def saw_sample(self):
-        self.last_data = utc_now()
+        self.last_data = now()
         self.last_data_mono = time.monotonic()
         self.total_samples += 1
 
@@ -196,7 +184,7 @@ class Status:
 
     def summary(self):
         """One sentence, spoken aloud, no jargon the driver has to decode."""
-        in_state = human_duration((utc_now() - self.state_since).total_seconds())
+        in_state = human_duration((now() - self.state_since).total_seconds())
         if self.state == "LIVE":
             src = "Replaying a recorded drive" if self.replay else "The car is talking to SimHub"
             line = f"{src} and data has been flowing for {in_state}."
@@ -232,21 +220,21 @@ class Status:
         return self.state == "LIVE"
 
     def snapshot(self):
-        now = utc_now()
+        ts = now()
         return {
             "schema": 1,
             "state": self.state,
             "healthy": self.healthy(),
             "summary": self.summary(),
-            "updated_at": iso(now),
-            "updated_unix": int(now.timestamp()),
+            "updated_at": iso(ts),
+            "updated_unix": int(ts.timestamp()),
             # If updated_at is older than this, the SUPERVISOR is gone and
             # everything above is a photograph. Check it before believing it.
             "stale_after_s": self.stale_after_s,
             "detail": {
                 "mode": "replay" if self.replay else "live",
                 "state_since": iso(self.state_since),
-                "seconds_in_state": int((now - self.state_since).total_seconds()),
+                "seconds_in_state": int((ts - self.state_since).total_seconds()),
                 "last_data_at": iso(self.last_data) if self.last_data else None,
                 "seconds_since_data": self.seconds_since_data(),
                 "samples_seen": self.total_samples,
@@ -255,7 +243,7 @@ class Status:
                 "last_exit": self.last_exit,
                 "feed_pid": self.feed_pid,
                 "supervisor_started_at": iso(self.started),
-                "supervisor_uptime_s": int((now - self.started).total_seconds()),
+                "supervisor_uptime_s": int((ts - self.started).total_seconds()),
                 "supervisor": self.settings,
             },
         }
@@ -395,13 +383,12 @@ def main():
 
     os.makedirs(args.log_dir, exist_ok=True)
     log_path = os.path.join(
-        args.log_dir, f"supervisor-{utc_now().strftime('%Y%m%d-%H%M%S')}.log")
+        args.log_dir, f"supervisor-{now().strftime('%Y%m%d-%H%M%S')}.log")
     log_file = open(log_path, "a", encoding="utf-8")
 
     stall_restart = (f"{args.stall_restart_seconds:g}s"
                      if args.stall_restart_seconds else "off (report only)")
     settings = {
-        "build": build_id(),
         "stall_seconds": args.stall_seconds,
         "stall_restart_seconds": args.stall_restart_seconds,
         "status_interval": args.status_interval,
@@ -426,12 +413,11 @@ def main():
         signal.signal(signal.SIGBREAK, on_signal)
 
     # The banner goes to the LOG as well as the console, and it names the
-    # build and the watchdog settings. When someone mails me a log from a
-    # driveway, "was the stall-restart even in this copy?" has to be
-    # answerable from the attachment — not from a question I ask them a day
-    # later while the car sits in a different state.
+    # watchdog settings. When someone mails me a log from a driveway, "was
+    # the stall-restart even in this copy?" has to be answerable from the
+    # attachment — not from a question I ask them a day later while the car
+    # sits in a different state.
     banner = [
-        f"supervisor: build   {settings['build']}",
         f"supervisor: watching {' '.join(argv)}",
         f"supervisor: status  -> {args.status_file}",
         f"supervisor: log     -> {log_path}",
@@ -568,7 +554,7 @@ def main():
                 backoff = args.backoff_start
 
             status.restarts += 1
-            status.last_restart = utc_now()
+            status.last_restart = now()
             if args.max_restarts and status.restarts > args.max_restarts:
                 status.set_state("STOPPED")
                 status.last_exit = {"code": rc,
