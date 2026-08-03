@@ -428,6 +428,15 @@ Four failures, four responses:
 | feed alive but no data this run for `--stall-restart-seconds` (default 45) | judges the process wedged, kills it, restarts it — a serial write blocked on a dead Bluetooth handle never exits by itself (field-found 2026-08-02, MX+ unplugged mid-drive). `0` restores report-only |
 | adapter was never there | reports `NO_ADAPTER`, keeps retrying forever |
 
+**It states its own settings.** The first lines of every supervisor log name
+the build (the commit, read straight out of `.git/HEAD`) and both watchdog
+thresholds, and the same block rides in the status file under
+`detail.supervisor`. That is there for one reason: when a log comes back from a
+car in a driveway saying the watchdog didn't fire, "was it even in that copy,
+and was it switched on?" has to be answerable from the attachment. A watchdog
+that doesn't record its own threshold makes every field report ambiguous
+between a bug and a setting.
+
 That last row is the one that matters in pre-grid. The supervisor can't
 power-cycle the adapter for you — but it never stops trying, so when you *do*
 pull and replug the MX+, the feed comes back on its own and you never touch

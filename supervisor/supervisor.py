@@ -109,6 +109,29 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+def build_id():
+    """Which commit is this, read without shelling out to git.
+
+    A field report that does not say what it was running costs a round trip
+    to a person in a driveway. Read .git/HEAD by hand: `git` may not be on
+    PATH under whatever launched us, and a subprocess at startup is a new
+    way to fail on the machine we are trying to be reliable on. Returns
+    "unknown" for a copy with no .git — a zip download is a legitimate way
+    to run this, and it should say so rather than lie.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, ".git", "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            ref = head[5:].strip()
+            with open(os.path.join(root, ".git", ref), encoding="utf-8") as f:
+                return f.read().strip()[:12]
+        return head[:12]                      # detached HEAD
+    except OSError:
+        return "unknown"
+
+
 def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -135,10 +158,16 @@ class Status:
     it this second, it does not claim it.
     """
 
-    def __init__(self, path, stale_after_s, replay):
+    def __init__(self, path, stale_after_s, replay, settings=None):
         self.path = path
         self.stale_after_s = stale_after_s
         self.replay = replay
+        # What this supervisor was told to do, carried into the status file so
+        # a snapshot from a driveway can be read without also asking the driver
+        # what they typed. A watchdog that does not record its own threshold
+        # makes every "it didn't fire" report ambiguous between a bug and a
+        # setting — which is exactly the round trip this exists to prevent.
+        self.settings = settings or {}
         self.started = utc_now()
         self.state = "STARTING"
         self.state_since = utc_now()
@@ -227,6 +256,7 @@ class Status:
                 "feed_pid": self.feed_pid,
                 "supervisor_started_at": iso(self.started),
                 "supervisor_uptime_s": int((now - self.started).total_seconds()),
+                "supervisor": self.settings,
             },
         }
 
@@ -368,8 +398,18 @@ def main():
         args.log_dir, f"supervisor-{utc_now().strftime('%Y%m%d-%H%M%S')}.log")
     log_file = open(log_path, "a", encoding="utf-8")
 
+    stall_restart = (f"{args.stall_restart_seconds:g}s"
+                     if args.stall_restart_seconds else "off (report only)")
+    settings = {
+        "build": build_id(),
+        "stall_seconds": args.stall_seconds,
+        "stall_restart_seconds": args.stall_restart_seconds,
+        "status_interval": args.status_interval,
+        "mode": "replay" if replay else "live",
+    }
+
     status = Status(args.status_file, stale_after_s=int(args.status_interval * 5 + 5),
-                    replay=replay)
+                    replay=replay, settings=settings)
     status.write()
 
     stopping = threading.Event()
@@ -385,10 +425,26 @@ def main():
         # a parent process (a launcher, the tests) can send to ask us to stop.
         signal.signal(signal.SIGBREAK, on_signal)
 
-    print(f"supervisor: watching {' '.join(argv)}")
-    print(f"supervisor: status  -> {args.status_file}")
-    print(f"supervisor: log     -> {log_path}")
-    print("supervisor: ctrl-c to stop.\n")
+    # The banner goes to the LOG as well as the console, and it names the
+    # build and the watchdog settings. When someone mails me a log from a
+    # driveway, "was the stall-restart even in this copy?" has to be
+    # answerable from the attachment — not from a question I ask them a day
+    # later while the car sits in a different state.
+    banner = [
+        f"supervisor: build   {settings['build']}",
+        f"supervisor: watching {' '.join(argv)}",
+        f"supervisor: status  -> {args.status_file}",
+        f"supervisor: log     -> {log_path}",
+        f"supervisor: stalled after {args.stall_seconds:g}s without data; "
+        f"kill-and-restart a wedged feed after {stall_restart}",
+        "supervisor: ctrl-c to stop.",
+    ]
+    for line in banner:
+        print(line)
+        log_file.write(line + "\n")
+    print()
+    log_file.write("\n")
+    log_file.flush()
 
     backoff = args.backoff_start
     current = None
