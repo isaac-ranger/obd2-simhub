@@ -534,29 +534,98 @@ def gear_status(snap):
 
 class RunLog:
     """Every run logs its samples to CSV as a side effect — free drive data.
-    Same format as probe --log plus whatever slow channels each sample has."""
+    Same format as probe --log plus whatever slow channels each sample has.
+
+    Three sizes (--run-log). 'full' is the original: a timestamped file
+    per run, kept forever — development, and any drive you mean to keep.
+    'tail' is the daily driver: ONE file, feed-last.csv, overwritten at
+    every start and size-capped, so "it did something strange an hour in"
+    stays diagnosable while nothing ever accumulates in runs/. If a run
+    was worth keeping, copy the file — the next start eats it. 'off' is
+    off: overlays are the product, some rigs want no side effects at all.
+    """
 
     COLS = [(0x0C, "rpm"), (0x0D, "speed_kmh"), (0x11, "throttle_pct"),
             (0x04, "load_pct"), (0x05, "coolant_c"), (0x5C, "oil_c"),
             (0x2F, "fuel_pct"), (0x33, "baro_kpa"), (0x42, "voltage_v"),
             (0x0E, "timing_deg")]
 
-    def __init__(self, directory):
+    TAIL_NAME = "feed-last.csv"
+    # ~3.5 hours of samples. When the cap trips, the OLDEST half goes and
+    # the newest half stays — never less than ~1.75h of recent history on
+    # disk, and never a file that grows past the cap. A plain truncate
+    # would be simpler and wrong: it drops everything at the boundary,
+    # including the row that tripped it, and the moment just before a
+    # wrap is a moment like any other — the funny thing is allowed to
+    # happen there too.
+    TAIL_CAP = 5 * 1024 * 1024
+
+    def __init__(self, directory, mode="full"):
+        self.mode = mode
+        self.path = None
+        self.note = ""
+        self.f = None
+        if mode == "off":
+            return
         os.makedirs(directory, exist_ok=True)
-        name = time.strftime("feed-%Y%m%d-%H%M%S.csv")
-        self.path = os.path.join(directory, name)
-        self.f = open(self.path, "w", encoding="ascii", newline="")
+        if mode == "tail":
+            self.path = os.path.join(directory, self.TAIL_NAME)
+            try:
+                # w+ because the wrap below reads back what it keeps
+                self.f = open(self.path, "w+", encoding="ascii", newline="")
+            except OSError:
+                # Windows: a viewer holding feed-last.csv (Excel does)
+                # locks it. Crashing at startup over a spreadsheet is the
+                # wrong trade at an event — fall back to a timestamped
+                # file for this run and say so.
+                self.mode = "full"
+                self.note = (f"  ({self.TAIL_NAME} is locked by another "
+                             f"program — keeping a full log this run)")
+        if self.mode == "full":
+            name = time.strftime("feed-%Y%m%d-%H%M%S.csv")
+            self.path = os.path.join(directory, name)
+            self.f = open(self.path, "w", encoding="ascii", newline="")
+        self._header()
+
+    def _header(self):
         self.f.write("t_s,gear," + ",".join(c for _p, c in self.COLS) + "\n")
 
     def row(self, t, gear, decoded):
+        if not self.f:
+            return
         cells = [f"{decoded[p]:.1f}" if p in decoded else ""
                  for p, _c in self.COLS]
         self.f.write(f"{t:.3f},{gear}," + ",".join(cells) + "\n")
         self.f.flush()
+        if self.mode == "tail" and self.f.tell() > self.TAIL_CAP:
+            self._wrap()
+
+    def _wrap(self):
+        self.f.seek(0)
+        tail = self.f.read()
+        tail = tail[len(tail) // 2:]
+        tail = tail[tail.find("\n") + 1:]      # start on a row boundary
+        self.f.seek(0)
+        self.f.truncate()
+        self._header()
+        self.f.write(tail)
+        self.f.flush()
+
+    def describe(self):
+        if not self.path:
+            return "(off)"
+        if self.mode == "tail":
+            return f"{self.path}  (tail of this run; --run-log full to keep)"
+        return self.path + self.note
+
+    def kept(self):
+        """For exit messages: where the data went, if anywhere."""
+        return f"Log kept: {self.path}" if self.path else "Run log was off."
 
     def close(self):
         try:
-            self.f.close()
+            if self.f:
+                self.f.close()
         except Exception:
             pass
 
@@ -641,7 +710,7 @@ def poll_car(args, state, run_log, sender, sched, elm, digit):
             misses += 1
             if misses >= 25:
                 print(f"\n{misses} consecutive failed samples — the car has "
-                      f"left the conversation. Log kept: {run_log.path}")
+                      f"left the conversation. {run_log.kept()}")
                 print("Power-cycle the adapter (unplug/replug), re-pair if "
                       "needed, and rerun.")
                 return 1
@@ -772,6 +841,15 @@ def build_parser():
                          "honest.")
     ap.add_argument("--log-dir", default="runs",
                     help="run-log directory (default: runs/)")
+    ap.add_argument("--run-log", choices=["full", "tail", "off"],
+                    default="tail",
+                    help="the CSV each run writes as a side effect: 'tail' "
+                         "(default) keeps ONE size-capped file, "
+                         "feed-last.csv, overwritten every start — nothing "
+                         "accumulates, the last run stays diagnosable; "
+                         "'full' keeps a timestamped file per run (drives "
+                         "you mean to keep, gear learning, development); "
+                         "'off' writes nothing")
     ap.add_argument("--register", action="store_true",
                     help="write the SimHub .simlink registration and exit")
     ap.add_argument("--list-ports", action="store_true")
@@ -846,10 +924,10 @@ def main():
 
     sender = Sender(state, packer, host, port,
                     is_replay=bool(args.replay))
-    run_log = RunLog(args.log_dir)
+    run_log = RunLog(args.log_dir, args.run_log)
     print(f"UDP feed  -> {host}:{port}  ({packer.size} bytes/packet at "
           f"{SEND_HZ:.0f} Hz)")
-    print(f"Run log   -> {run_log.path}")
+    print(f"Run log   -> {run_log.describe()}")
     print(f"Units     -> {args.resolved_units}   "
           f"tire set -> {active} (speed factor {speed_factor:g})")
     print(f"Dash gear -> {args.dash_gear}"
@@ -899,7 +977,7 @@ def main():
             # loop the miss counter absorbs it first. Same advice either way.
             print(f"\nAborted mid-run: {e}")
             print("Power-cycle the adapter (unplug/replug), re-pair if "
-                  f"needed, and rerun. Log kept: {run_log.path}")
+                  f"needed, and rerun. {run_log.kept()}")
             return 1
         finally:
             if args.debug:
@@ -909,7 +987,7 @@ def main():
             elm.close()
     except KeyboardInterrupt:
         print(f"\nStopped. {sender.sent} packets sent, {sender.errors} "
-              f"send errors. Log kept: {run_log.path}")
+              f"send errors. {run_log.kept()}")
         return 0
     finally:
         sender.stop.set()

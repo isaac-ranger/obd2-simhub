@@ -141,6 +141,73 @@ def human_duration(seconds):
     return f"{h}h {m}m"
 
 
+class LogSink:
+    """The supervisor's disk log (its own notes plus the feed's output),
+    in three sizes to match the feed's --run-log: 'full' keeps a
+    timestamped file per start, forever — development. 'tail' (default)
+    keeps ONE file, supervisor-last.log, overwritten at every start and
+    size-capped, so the last session stays diagnosable and nothing
+    accumulates across an autocross season. 'off' writes nothing.
+
+    Every existing write site talks to this unchanged: when the log is
+    off, writes fall through — the console echo and the status file are
+    unaffected either way."""
+
+    NAME = "supervisor-last.log"
+    # When the cap trips, the oldest half goes and the newest half stays
+    # — the lines a bug report needs are the recent ones, and a plain
+    # truncate would drop exactly the line that tripped it.
+    CAP = 5 * 1024 * 1024
+
+    def __init__(self, directory, mode):
+        self.mode = mode
+        self.path = None
+        self.note = ""
+        self.f = None
+        if mode == "off":
+            return
+        os.makedirs(directory, exist_ok=True)
+        if mode == "tail":
+            self.path = os.path.join(directory, self.NAME)
+            try:
+                # w+ because the wrap below reads back what it keeps
+                self.f = open(self.path, "w+", encoding="utf-8")
+            except OSError:
+                # Windows: a viewer holding the file locks it. Keep the
+                # session alive on a timestamped file and say so.
+                self.mode = "full"
+                self.note = (f"  ({self.NAME} is locked by another "
+                             f"program — keeping a full log this session)")
+        if self.mode == "full":
+            name = f"supervisor-{now().strftime('%Y%m%d-%H%M%S')}.log"
+            self.path = os.path.join(directory, name)
+            self.f = open(self.path, "a", encoding="utf-8")
+
+    def write(self, s):
+        if not self.f:
+            return
+        self.f.write(s)
+        if self.mode == "tail" and self.f.tell() > self.CAP:
+            self.f.seek(0)
+            tail = self.f.read()
+            tail = tail[len(tail) // 2:]
+            tail = tail[tail.find("\n") + 1:]  # start on a line boundary
+            self.f.seek(0)
+            self.f.truncate()
+            self.f.write(f"(log wrapped at {iso(now())} — "
+                         f"older lines dropped)\n")
+            self.f.write(tail)
+            self.f.flush()
+
+    def flush(self):
+        if self.f:
+            self.f.flush()
+
+    def close(self):
+        if self.f:
+            self.f.close()
+
+
 class Status:
     """The supervisor's view of the world, and the file it writes it to.
 
@@ -385,6 +452,13 @@ def build_parser():
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--log-dir", default=os.path.join(REPO, "runs"),
                     help="where to keep the supervisor log (default: runs/)")
+    ap.add_argument("--run-log", choices=["full", "tail", "off"],
+                    default="tail",
+                    help="the disk copy of this log: 'tail' (default) keeps "
+                         "ONE size-capped file, supervisor-last.log, "
+                         "overwritten every start; 'full' keeps a "
+                         "timestamped file per start; 'off' writes nothing "
+                         "(console echo and the status file are unaffected)")
     ap.add_argument("--quiet", action="store_true",
                     help="do not echo the feed's output to this console")
     return ap
@@ -398,10 +472,7 @@ def main():
     argv = build_feed_argv(args, feed_args)
     replay = any(a == "--replay" or a.startswith("--replay=") for a in feed_args)
 
-    os.makedirs(args.log_dir, exist_ok=True)
-    log_path = os.path.join(
-        args.log_dir, f"supervisor-{now().strftime('%Y%m%d-%H%M%S')}.log")
-    log_file = open(log_path, "a", encoding="utf-8")
+    log_file = LogSink(args.log_dir, args.run_log)
 
     stall_restart = (f"{args.stall_restart_seconds:g}s"
                      if args.stall_restart_seconds else "off (report only)")
@@ -437,7 +508,9 @@ def main():
     banner = [
         f"supervisor: watching {' '.join(argv)}",
         f"supervisor: status  -> {args.status_file}",
-        f"supervisor: log     -> {log_path}",
+        f"supervisor: log     -> {log_file.path or '(off)'}"
+        + ("  (tail of this session; --run-log full to keep)"
+           if log_file.mode == "tail" else "") + log_file.note,
         f"supervisor: stalled after {args.stall_seconds:g}s without data; "
         f"kill-and-restart a wedged feed after {stall_restart}",
         "supervisor: ctrl-c to stop.",

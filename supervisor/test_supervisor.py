@@ -21,7 +21,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from supervisor import SAMPLE_LINE, Status, FeedProcess, human_duration
+from supervisor import SAMPLE_LINE, Status, FeedProcess, LogSink, human_duration
 
 REPO = os.path.join(HERE, os.pardir)
 SUP = os.path.join(HERE, "supervisor.py")
@@ -360,6 +360,58 @@ ok("the fresh run reached data again after the kill",
 stop(proc)
 
 # --- the staleness contract -------------------------------------------------------
+print("\nlog sink — the disk log in three sizes")
+tmp = tempfile.mkdtemp()
+a = LogSink(tmp, "tail")
+a.write("first session\n")
+a.close()
+b = LogSink(tmp, "tail")
+b.write("second session\n")
+b.close()
+ok("tail: one file, same name, every start",
+   os.listdir(tmp) == ["supervisor-last.log"], f"{os.listdir(tmp)}")
+with open(b.path) as f:
+    content = f.read()
+ok("tail: a new start overwrites the last session",
+   content == "second session\n", repr(content))
+
+c = LogSink(tmp, "tail")
+c.CAP = 200                          # shrink the cap to test the wrap
+for i in range(50):
+    c.write(f"line {i}: something the feed said\n")
+c.close()
+with open(c.path) as f:
+    lines = f.read().splitlines()
+ok("tail: the cap wraps instead of growing",
+   os.path.getsize(c.path) <= 200 + 100, f"{os.path.getsize(c.path)}B")
+ok("tail: the wrap says so out loud", "wrapped" in lines[0], lines[0])
+ok("tail: the newest lines survive", lines[-1].startswith("line 49"), lines[-1])
+
+off = LogSink(tmp, "off")
+off.write("into the void\n")         # must be a no-op, not a crash
+off.flush()
+off.close()
+ok("off: writes nothing, breaks nothing",
+   os.listdir(tmp) == ["supervisor-last.log"] and off.path is None,
+   f"{os.listdir(tmp)}")
+
+full = LogSink(tmp, "full")
+full.write("kept\n")
+full.close()
+ok("full: timestamped file per start, kept",
+   any(n.startswith("supervisor-2") for n in os.listdir(tmp)),
+   f"{os.listdir(tmp)}")
+
+lockdir = tempfile.mkdtemp()
+os.mkdir(os.path.join(lockdir, LogSink.NAME))   # refuses the open like a lock
+locked = LogSink(lockdir, "tail")
+locked.write("still alive\n")
+locked.close()
+ok("tail: a locked file falls back to a timestamped one, session stays alive",
+   locked.mode == "full" and "locked" in locked.note
+   and os.path.basename(locked.path).startswith("supervisor-2"),
+   f"path={locked.path!r} note={locked.note!r}")
+
 print("\nstaleness contract")
 tmp = tempfile.mkdtemp()
 proc, sp = run_supervisor(tmp, write_stub(tmp, "alive.py", STUB_ALIVE), settle=1.5)

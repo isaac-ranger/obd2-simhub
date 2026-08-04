@@ -227,7 +227,7 @@ py extractor\obd_feed.py --port COM3
 
 ```
 UDP feed  -> 127.0.0.1:35353  (101 bytes/packet at 60 Hz)
-Run log   -> runs\feed-20260803-093429.csv
+Run log   -> runs\feed-last.csv  (tail of this run; --run-log full to keep)
 Units     -> imperial   tire set -> street_18 (speed factor 1)
 Dash gear -> hold
 Contract  -> SimHub definition 9a62309a-… (layout v1.0)
@@ -250,13 +250,23 @@ moving too.
 
 Ctrl-C to stop.
 
-Every run logs itself to `runs/*.csv` as a side effect, so every errand is free
-calibration data.
+Every run logs itself to CSV as a side effect — but by default only the **last**
+run survives: `runs\feed-last.csv`, overwritten at every start and size-capped,
+so nothing accumulates no matter how long the season. Something strange happen
+an hour in? The file has it — copy it out before the next start eats it. Three
+settings (`--run-log`, or `run_log` in config.json):
+
+* **`tail`** (default) — one overwritten file. Overlays are the product;
+  the log is a diagnostic, not an archive.
+* **`full`** — a timestamped file per run, kept forever. For drives you mean
+  to keep: gear learning, development, data-making. The supervisor takes the
+  same option for its own `runs\supervisor-*.log`.
+* **`off`** — nothing at all.
 
 ### After the drive: the report
 
 ```
-py report.py runs\feed-20260803-093429.csv
+py report.py runs\feed-last.csv
 ```
 
 Five sections: cadence and channel coverage; the gear ladder measured *this*

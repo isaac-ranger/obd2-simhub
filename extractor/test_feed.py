@@ -421,6 +421,60 @@ with tempfile.TemporaryDirectory() as td:
     ok("runlog: row carries t, gear, rpm",
        lines[1].startswith("1.234,3,3000.0,70.0,"), lines[1])
 
+# The three --run-log sizes. 'tail' is the shipped default and its whole
+# promise is subtractive — same name every run, last run only, never past
+# the cap — so every clause of that gets pinned.
+with tempfile.TemporaryDirectory() as td:
+    a = RunLog(td, "tail")
+    a.row(1.0, 2, {0x0C: 2000.0})
+    a.close()
+    b = RunLog(td, "tail")
+    b.row(2.0, 3, {0x0C: 3000.0})
+    b.close()
+    ok("runlog tail: one file, same name, every run",
+       os.listdir(td) == ["feed-last.csv"], f"{os.listdir(td)}")
+    with open(b.path) as f:
+        lines = f.read().splitlines()
+    ok("runlog tail: a new run overwrites the last one",
+       len(lines) == 2 and lines[1].startswith("2.000,"), f"{lines}")
+
+    c = RunLog(td, "tail")
+    c.TAIL_CAP = 200                     # shrink the cap to test the wrap
+    for i in range(50):
+        c.row(float(i), 1, {0x0C: 1000.0})
+    c.close()
+    with open(c.path) as f:
+        lines = f.read().splitlines()
+    ok("runlog tail: the cap wraps instead of growing",
+       os.path.getsize(c.path) <= 200 + 100, f"{os.path.getsize(c.path)}B")
+    ok("runlog tail: a wrapped file still starts with its header",
+       lines[0].startswith("t_s,gear,"), lines[0])
+    ok("runlog tail: the newest rows survive the wrap",
+       lines[-1].startswith("49.000,"), lines[-1])
+
+    off = RunLog(td, "off")
+    off.row(1.0, 1, {0x0C: 1000.0})      # must be a no-op, not a crash
+    off.close()
+    ok("runlog off: writes nothing", os.listdir(td) == ["feed-last.csv"],
+       f"{os.listdir(td)}")
+    ok("runlog off: exit message doesn't point at a ghost",
+       off.kept() == "Run log was off.", off.kept())
+
+# Windows reality: a viewer holding feed-last.csv open (Excel does this)
+# locks it, and the next start must not crash over a spreadsheet. A
+# directory with the tail's name refuses the open the same way a lock
+# does, on every platform this test runs on.
+with tempfile.TemporaryDirectory() as td:
+    os.mkdir(os.path.join(td, RunLog.TAIL_NAME))
+    locked = RunLog(td, "tail")
+    locked.row(1.0, 2, {0x0C: 2000.0})
+    locked.close()
+    ok("runlog tail: a locked feed-last.csv falls back, run stays alive",
+       locked.mode == "full"
+       and os.path.basename(locked.path).startswith("feed-2")
+       and "locked" in locked.describe(),
+       f"path={locked.path!r} describe={locked.describe()!r}")
+
 # --- end to end against the fake car (needs pyserial) -----------------------------
 
 try:
