@@ -1,0 +1,12 @@
+{
+  "common": {
+    "port": "COM3",
+    "baud": 115200
+  },
+  "obd_feed": {
+    "dash_gear": "hold"
+  },
+  "supervisor": {
+    "quiet": false
+  }
+}

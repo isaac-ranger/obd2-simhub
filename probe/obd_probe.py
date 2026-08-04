@@ -28,9 +28,14 @@ Never writes to the ECU, never clears codes.
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir))
+from obd_config import parse_with_config
 
 try:
     import serial  # pyserial
@@ -520,7 +525,7 @@ def run_probe(elm, report, args):
     return True
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="OBD2 adapter/vehicle probe (phase 1 of OBD2->SimHub)")
     ap.add_argument("--port", help="COM port (COM5), device (/dev/rfcomm0), or socket://host:port")
     ap.add_argument("--baud", type=int, default=115200, help="baud rate (ignored by Bluetooth SPP)")
@@ -531,7 +536,12 @@ def main():
                          "throttle to CSV until Ctrl-C (for gear-ratio learning)")
     ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     ap.add_argument("--debug", action="store_true", help="dump raw traffic at the end")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    ap = build_parser()
+    args = parse_with_config(ap, "obd_probe")
 
     if serial is None:
         sys.exit("pyserial is required:  pip install pyserial")

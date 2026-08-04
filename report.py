@@ -37,6 +37,9 @@ import os
 import statistics
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from obd_config import parse_with_config
+
 MIN_RPM = 900.0        # below this the engine is idling or off
 MIN_SPEED = 8.0        # km/h; below this speed quantization wrecks the ratio
 STEADY_PCT = 3.0       # consecutive-sample ratio agreement = "holding a gear"
@@ -347,12 +350,16 @@ def extremes_report(rows, cal):
     return lines or ["(no extreme-worthy channels in this log)"]
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="Post-drive report from a run log.")
     ap.add_argument("log", help="CSV from obd_feed.py's run log or obd_probe.py --log")
     ap.add_argument("--calibration", default=None,
                     help="calibration.json (default: next to this script)")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = parse_with_config(build_parser(), "report")
 
     cal_path = args.calibration or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "calibration.json")

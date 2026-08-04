@@ -54,6 +54,40 @@ That's the only dependency.
 
 Everything below uses `COM3` as the example. Substitute yours.
 
+## Write it down once: config.json
+
+The port never changes once a rig works, so no command below actually needs
+it typed. Copy the example and put yours in:
+
+```
+copy config.example.json config.json
+```
+
+```json
+{
+  "common": { "port": "COM3" }
+}
+```
+
+From then on `py extractor\obd_feed.py` alone is a complete command. The
+rules, all four of them:
+
+* **`common`** holds values shared by more than one tool (the port, the
+  baud). A section named after a tool (`obd_feed`, `obd_probe`,
+  `learn_gears`, `fake_car`, `supervisor`, `report`) applies to that tool
+  only, and beats `common`.
+* **The command line beats the file.** `--port COM7` on a config that says
+  `COM3` means `COM7`, today only.
+* **A key is the option name with underscores:** `--dash-gear` →
+  `dash_gear`. Every option of every tool works — the keys come from the
+  tools' own parsers, so there is no separate list to fall out of date.
+* **A typo refuses to start.** A key or section nothing recognizes stops
+  the tool with an error naming it (and usually the fix), because a setting
+  that's silently ignored looks exactly like a setting that doesn't work.
+
+`config.json` is yours: hand-edited, untracked. `calibration.json` stays
+machine-written by `learn_gears.py`. Neither ever touches the other.
+
 ---
 
 # Step 1 — Probe: what can your car actually do?
@@ -309,7 +343,7 @@ py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
 ```
 py probe\test_parse.py            py probe\test_learn_gears.py
 py extractor\test_feed.py         py supervisor\test_supervisor.py
-py test_report.py
+py test_report.py                 py test_config.py
 ```
 
 The parser suite is 51 adversarial fixtures (single-frame, batched, ISO-TP
@@ -333,6 +367,8 @@ extractor/     obd_feed.py      step 4 — the live feed
 supervisor/    supervisor.py    step 5 — keeps the feed alive
 simdef/        the SimHub contract
 calibration.json                your car: gears, tires, tank, units
+config.example.json             copy to config.json: your rig (port, baud)
+obd_config.py                   the config layer every tool loads
 report.py                       post-drive analysis
 docs/          DEVELOPMENT-NOTES.md
 ```

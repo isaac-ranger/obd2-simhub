@@ -32,6 +32,9 @@ import time
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
 
+sys.path.insert(0, REPO)
+from obd_config import parse_with_config
+
 # PID payload sizes for the PIDs this fake car supports.
 SUPPORTED = {0x04: 1, 0x05: 1, 0x0C: 2, 0x0D: 1, 0x11: 1,
              0x2F: 1, 0x33: 1, 0x42: 2, 0x5C: 1}
@@ -274,11 +277,15 @@ def serve_background(port=0):
     return real_port, th
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="fake ELM327 + car (TCP)")
     ap.add_argument("--tcp", type=int, default=35000,
                     help="TCP port to listen on (default 35000)")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = parse_with_config(build_parser(), "fake_car")
     serve(args.tcp)
     return 0
 

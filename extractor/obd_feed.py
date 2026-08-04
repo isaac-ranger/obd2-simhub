@@ -42,8 +42,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "probe"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir))
 from obd_probe import (Elm, ElmError, parse_mode01, adapter_init,
                        get_supported_pids, DASH_PIDS)
+from obd_config import parse_with_config
 
 # The three channels a sim overlay lives or dies by. Pinned into every
 # request; everything else rotates through the remaining slots.
@@ -735,7 +738,7 @@ def register_simdef(layout, layout_path):
 
 # --------------------------------------------------------------------------
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(
         description="OBD2 -> SimHub UDP telemetry feed (phase 2)")
     src = ap.add_mutually_exclusive_group()
@@ -774,7 +777,12 @@ def main():
     ap.add_argument("--list-ports", action="store_true")
     ap.add_argument("--debug", action="store_true",
                     help="dump raw adapter traffic on exit")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    ap = build_parser()
+    args = parse_with_config(ap, "obd_feed")
 
     layout = load_json(args.layout, "feed layout")
     if args.register:

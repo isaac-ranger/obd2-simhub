@@ -45,6 +45,10 @@ import statistics
 import sys
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir))
+from obd_config import parse_with_config
+
 MIN_RPM = 900.0        # below this the engine is idling or off
 MIN_SPEED = 8.0        # km/h; below this speed quantization wrecks the ratio
 STEADY_PCT = 3.0       # consecutive-sample ratio agreement = "holding a gear"
@@ -127,14 +131,18 @@ def write_calibration(path, gears, source):
         f.write("\n")
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="Learn gear constants from a drive log.")
     ap.add_argument("log", help="CSV from obd_probe.py --log")
     ap.add_argument("--gears", type=int, default=6,
                     help="expected gear count, 0 = no expectation (default 6)")
     ap.add_argument("--write", metavar="CALIBRATION_JSON",
                     help="update this calibration file's gears section in place")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = parse_with_config(build_parser(), "learn_gears")
 
     samples = load_samples(args.log)
     if not samples:

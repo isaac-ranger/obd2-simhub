@@ -88,6 +88,9 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
+sys.path.insert(0, REPO)
+from obd_config import parse_with_config, default_config_path
+
 # The feed's per-second status line: "  t   42s  RPM  2100  speed ...".
 # Replay mode prints the same shape, so one pattern covers both.
 SAMPLE_LINE = re.compile(r"^\s*t\s+\d+s\s+RPM\s")
@@ -334,11 +337,21 @@ def build_feed_argv(args, feed_args):
     feed = args.feed or os.path.join(REPO, "extractor", "obd_feed.py")
     if not os.path.exists(feed):
         sys.exit(f"cannot find the feed at {feed} — pass --feed to point at it")
+    feed_args = list(feed_args)
+    # A supervisor pointed at a non-default config file supervises a feed
+    # that must read the same one — two processes disagreeing about which
+    # file governs is a bug report nobody can reproduce. The default is
+    # not forwarded: the feed finds that on its own, and an explicit path
+    # that does not exist should fail loudly, not implicitly.
+    if (args.config != default_config_path()
+            and not any(a == "--config" or a.startswith("--config=")
+                        for a in feed_args)):
+        feed_args = ["--config", args.config] + feed_args
     # -u: unbuffered child, so the per-second status line arrives per second.
-    return [args.python, "-u", feed] + list(feed_args)
+    return [args.python, "-u", feed] + feed_args
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(
         description="Keep obd_feed.py alive and publish a status file.",
         epilog="Everything after -- is passed to obd_feed.py untouched.",
@@ -374,7 +387,11 @@ def main():
                     help="where to keep the supervisor log (default: runs/)")
     ap.add_argument("--quiet", action="store_true",
                     help="do not echo the feed's output to this console")
-    args, feed_args = ap.parse_known_args()
+    return ap
+
+
+def main():
+    args, feed_args = parse_with_config(build_parser(), "supervisor", known=True)
     if feed_args and feed_args[0] == "--":
         feed_args = feed_args[1:]
 

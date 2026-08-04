@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 runs/
 status/obd2_status.json
+config.json
