@@ -10,6 +10,14 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# The suite must never read a real config.json in the repo root — pin a
+# fixture on every spawned report (an adversarial QA rule, house-wide).
+CFG_FIXTURE = os.path.join(tempfile.mkdtemp(prefix="report_test_cfg_"), "config.json")
+with open(CFG_FIXTURE, "w") as _f:
+    _f.write("{}\n")
+
+
 sys.path.insert(0, HERE)
 
 from report import (load_rows, gear_report, shift_report, warmup_report,
@@ -177,7 +185,7 @@ os.unlink(npath)
 bad_cal = os.path.join(tempfile.mkdtemp(), "cal.json")
 with open(bad_cal, "w") as f:
     f.write("")
-proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"), "--config", CFG_FIXTURE,
                        DRIVE2, "--calibration", bad_cal],
                       capture_output=True, text=True)
 ok("hostile: an explicitly named broken calibration refuses loudly",
@@ -186,7 +194,7 @@ ok("hostile: an explicitly named broken calibration refuses loudly",
 zpath = os.path.join(tempfile.mkdtemp(), "cal.json")
 with open(zpath, "w") as f:
     f.write('{"gears": {"rpm_per_kmh": [0.0, 60.4]}}')
-proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"), "--config", CFG_FIXTURE,
                        DRIVE2, "--calibration", zpath],
                       capture_output=True, text=True)
 ok("hostile: zero gear constant refuses with a named message",
@@ -194,14 +202,14 @@ ok("hostile: zero gear constant refuses with a named message",
    proc.stderr[-200:])
 
 # --- CLI end to end -------------------------------------------------------
-proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"), "--config", CFG_FIXTURE,
                        DRIVE2], capture_output=True, text=True)
 ok("cli: exit 0 and all five sections present",
    proc.returncode == 0 and all(s in proc.stdout for s in
                                 ("DRIVE", "GEARS", "SHIFTS", "WARM-UP",
                                  "EXTREMES")),
    proc.stdout[-400:] + proc.stderr[-400:])
-proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"), "--config", CFG_FIXTURE,
                        DRIVE2, "--calibration", "/nonexistent.json"],
                       capture_output=True, text=True)
 ok("cli: missing calibration degrades, still exits 0",

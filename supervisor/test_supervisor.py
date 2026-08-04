@@ -90,10 +90,21 @@ def write_stub(d, name, body):
     return p
 
 
+# Every spawned supervisor gets this fixture so the suite never reads a
+# real config.json in the repo root — a user's own settings (say,
+# max_restarts) would otherwise fail assertions that have nothing to do
+# with the code. Found by an adversarial QA pass, kept as a rule: tests
+# pin their config.
+CFG_FIXTURE = os.path.join(tempfile.mkdtemp(prefix="sup_test_cfg_"), "config.json")
+with open(CFG_FIXTURE, "w", encoding="utf-8") as _f:
+    _f.write("{}\n")
+
+
 def run_supervisor(tmp, stub, extra=(), settle=2.0):
     """Launch the supervisor on a stub feed, let it settle, return (proc, status_path)."""
     status_path = os.path.join(tmp, "obd2_status.json")
     argv = [sys.executable, "-u", SUP,
+            "--config", CFG_FIXTURE,
             "--status-file", status_path,
             "--status-interval", "0.15",
             "--stall-seconds", "1",
@@ -368,31 +379,43 @@ a.close()
 b = LogSink(tmp, "tail")
 b.write("second session\n")
 b.close()
-ok("tail: one file, same name, every start",
-   os.listdir(tmp) == ["supervisor-last.log"], f"{os.listdir(tmp)}")
+ok("tail: the previous session survives one generation",
+   sorted(os.listdir(tmp)) == ["supervisor-last.log", "supervisor-prev.log"],
+   f"{os.listdir(tmp)}")
 with open(b.path) as f:
     content = f.read()
-ok("tail: a new start overwrites the last session",
-   content == "second session\n", repr(content))
+ok("tail: last holds the new session", content == "second session\n",
+   repr(content))
+with open(os.path.join(tmp, LogSink.PREV)) as f:
+    prev_content = f.read()
+ok("tail: prev holds the one before — a restart no longer erases its "
+   "own reason", prev_content == "first session\n", repr(prev_content))
 
 c = LogSink(tmp, "tail")
-c.CAP = 200                          # shrink the cap to test the wrap
-for i in range(50):
-    c.write(f"line {i}: something the feed said\n")
+c.CAP = 600                          # shrink the cap to test the wrap
+for i in range(60):
+    c.write(f"line {i:02d}: something the feed said\n")
 c.close()
 with open(c.path) as f:
     lines = f.read().splitlines()
-ok("tail: the cap wraps instead of growing",
-   os.path.getsize(c.path) <= 200 + 100, f"{os.path.getsize(c.path)}B")
-ok("tail: the wrap says so out loud", "wrapped" in lines[0], lines[0])
-ok("tail: the newest lines survive", lines[-1].startswith("line 49"), lines[-1])
+data = [ln for ln in lines if ln.startswith("line ")]
+first_n = int(data[0].split()[1].rstrip(":"))
+ok("tail: the wrap drops the OLD half", first_n >= 10,
+   f"first surviving line is {first_n} (0 = keep-oldest)")
+ok("tail: the wrap says so out loud",
+   any("wrapped" in ln for ln in lines), f"{lines[:1]}")
+ok("tail: the newest lines survive", data[-1].startswith("line 59"),
+   data[-1])
+ok("tail: the cap bounds the file",
+   os.path.getsize(c.path) <= 600 + 200, f"{os.path.getsize(c.path)}B")
 
+before = sorted(os.listdir(tmp))
 off = LogSink(tmp, "off")
 off.write("into the void\n")         # must be a no-op, not a crash
 off.flush()
 off.close()
 ok("off: writes nothing, breaks nothing",
-   os.listdir(tmp) == ["supervisor-last.log"] and off.path is None,
+   sorted(os.listdir(tmp)) == before and off.path is None,
    f"{os.listdir(tmp)}")
 
 full = LogSink(tmp, "full")
@@ -403,14 +426,27 @@ ok("full: timestamped file per start, kept",
    f"{os.listdir(tmp)}")
 
 lockdir = tempfile.mkdtemp()
-os.mkdir(os.path.join(lockdir, LogSink.NAME))   # refuses the open like a lock
+with open(os.path.join(lockdir, LogSink.NAME), "w") as f:
+    f.write("held by a viewer\n")
+os.mkdir(os.path.join(lockdir, LogSink.PREV))   # refuses rotation like a lock
 locked = LogSink(lockdir, "tail")
 locked.write("still alive\n")
 locked.close()
-ok("tail: a locked file falls back to a timestamped one, session stays alive",
+ok("tail: a locked rotation falls back to a timestamped file, session "
+   "stays alive",
    locked.mode == "full" and "locked" in locked.note
    and os.path.basename(locked.path).startswith("supervisor-2"),
    f"path={locked.path!r} note={locked.note!r}")
+
+hostile = os.path.join(lockdir, "blocker")
+with open(hostile, "w") as f:
+    f.write("a file where a directory must go")
+dead = LogSink(os.path.join(hostile, "logs"), "tail")
+dead.write("nowhere to put this\n")  # must not raise
+dead.close()
+ok("an impossible log dir disables the disk log, never the session",
+   dead.f is None and dead.failed is not None and "unavailable" in dead.note,
+   f"failed={dead.failed!r} note={dead.note!r}")
 
 print("\nstaleness contract")
 tmp = tempfile.mkdtemp()

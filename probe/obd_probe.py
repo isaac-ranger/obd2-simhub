@@ -534,7 +534,10 @@ def build_parser():
     ap.add_argument("--log", metavar="FILE.csv",
                     help="drive-log mode: skip the survey, poll RPM/speed/"
                          "throttle to CSV until Ctrl-C (for gear-ratio learning)")
-    ap.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
+    # A verb, not a setting (see obd_feed.build_parser): configured true it
+    # would turn every probe run into a port listing.
+    ap.add_argument("--list-ports", action="store_true",
+                    help="list serial ports and exit").per_run = True
     ap.add_argument("--debug", action="store_true", help="dump raw traffic at the end")
     return ap
 

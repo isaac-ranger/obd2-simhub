@@ -70,23 +70,33 @@ copy config.example.json config.json
 ```
 
 From then on `py extractor\obd_feed.py` alone is a complete command. The
-rules, all four of them:
+rules, all five of them:
 
 * **`common`** holds values shared by more than one tool (the port, the
   baud). A section named after a tool (`obd_feed`, `obd_probe`,
   `learn_gears`, `fake_car`, `supervisor`, `report`) applies to that tool
   only, and beats `common`.
 * **The command line beats the file.** `--port COM7` on a config that says
-  `COM3` means `COM7`, today only.
+  `COM3` means `COM7`, today only. (To keep that promise airtight, option
+  abbreviations are off — spell `--port` out, `--po` is refused.)
 * **A key is the option name with underscores:** `--dash-gear` →
-  `dash_gear`. Every option of every tool works — the keys come from the
+  `dash_gear`. Every *setting* of every tool works — the keys come from the
   tools' own parsers, so there is no separate list to fall out of date.
-* **A typo refuses to start.** A key or section nothing recognizes stops
-  the tool with an error naming it (and usually the fix), because a setting
-  that's silently ignored looks exactly like a setting that doesn't work.
+  Actions you take once (`--register`, `--list-ports`, `--write`) are not
+  settings and are refused, because a config that performed them on every
+  start would haunt you.
+* **A typo refuses to start.** A bad key, section, value type, or choice
+  stops the tool it belongs to with an error naming it (and usually the
+  fix). A typo in *another* tool's section prints a warning the first time
+  anything runs, so it never waits until event day to speak.
+* **Windows paths: `\\` or `/`.** JSON eats single backslashes
+  (`"D:\runs"` turns `\r` into an invisible byte); a value that arrives
+  mangled that way is refused by name.
 
 `config.json` is yours: hand-edited, untracked. `calibration.json` stays
 machine-written by `learn_gears.py`. Neither ever touches the other.
+(`config.example.json` carries a few more illustrative keys than the
+snippet above — all of them defaults, safe to copy verbatim.)
 
 ---
 
@@ -226,8 +236,9 @@ py extractor\obd_feed.py --port COM3
 ### What you should see
 
 ```
+Source    -> COM3
 UDP feed  -> 127.0.0.1:35353  (101 bytes/packet at 60 Hz)
-Run log   -> runs\feed-last.csv  (tail of this run; --run-log full to keep)
+Run log   -> runs\feed-last.csv  (tail of this run; previous run kept at feed-prev.csv; --run-log full to keep everything)
 Units     -> imperial   tire set -> street_18 (speed factor 1)
 Dash gear -> hold
 Contract  -> SimHub definition 9a62309a-… (layout v1.0)
@@ -250,17 +261,24 @@ moving too.
 
 Ctrl-C to stop.
 
-Every run logs itself to CSV as a side effect — but by default only the **last**
-run survives: `runs\feed-last.csv`, overwritten at every start and size-capped,
-so nothing accumulates no matter how long the season. Something strange happen
-an hour in? The file has it — copy it out before the next start eats it. Three
-settings (`--run-log`, or `run_log` in config.json):
+Every run logs itself to CSV as a side effect — but by default only the last
+run and the one before it survive: `runs\feed-last.csv` and
+`runs\feed-prev.csv`, size-capped, so nothing accumulates no matter how long
+the season. Something strange happen an hour in? The file has it — and it
+survives one more start (rotating to `feed-prev.csv`) before a second
+data-bearing run eats it, so even an automatic supervisor restart can't
+destroy the evidence of the failure it just recovered from. A run that never
+hears the car writes nothing and destroys nothing. Three settings
+(`--run-log`, or `run_log` in config.json — `"common": {"run_log": "full"}`
+covers the feed and the supervisor in one line):
 
-* **`tail`** (default) — one overwritten file. Overlays are the product;
-  the log is a diagnostic, not an archive.
+* **`tail`** (default) — last run plus one generation back, capped, nothing
+  more. Overlays are the product; the log is a diagnostic, not an archive.
 * **`full`** — a timestamped file per run, kept forever. For drives you mean
   to keep: gear learning, development, data-making. The supervisor takes the
-  same option for its own `runs\supervisor-*.log`.
+  same option for its own `runs\supervisor-*.log`. **This was the old
+  default** — if you've been letting run logs pile up as calibration food,
+  set it and nothing changes for you.
 * **`off`** — nothing at all.
 
 ### After the drive: the report

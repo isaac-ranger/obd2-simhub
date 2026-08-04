@@ -378,6 +378,16 @@ def main():
                  f"needs at least 2 (expected columns: the header "
                  f"obd_probe.py --log or obd_feed.py's run log writes)")
 
+    if rows[0]["t_s"] > 60.0:
+        # A tail-mode run log that hit its size cap keeps only the newest
+        # half, so the file starts mid-drive. Every section below is
+        # honest about what's IN the file — this line is honest about
+        # what isn't. Warm-up especially: a log that starts warm would
+        # otherwise read as a car that never warmed.
+        print(f"NOTE: this log begins at t={rows[0]['t_s']:.0f}s — earlier "
+              f"samples were dropped (tail-mode size cap). Everything "
+              f"below describes the surviving part only.\n")
+
     sections = [("DRIVE", overview(rows, args.log))]
     gears = (cal.get("gears", {}) or {}).get("rpm_per_kmh")
     if gears and not all(isinstance(c, (int, float)) and c > 0 for c in gears):

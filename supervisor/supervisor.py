@@ -89,7 +89,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 sys.path.insert(0, REPO)
-from obd_config import parse_with_config, default_config_path
+from obd_config import parse_with_config, default_config_path, resolved_defaults
 
 # The feed's per-second status line: "  t   42s  RPM  2100  speed ...".
 # Replay mode prints the same shape, so one pattern covers both.
@@ -154,6 +154,7 @@ class LogSink:
     unaffected either way."""
 
     NAME = "supervisor-last.log"
+    PREV = "supervisor-prev.log"
     # When the cap trips, the oldest half goes and the newest half stays
     # — the lines a bug report needs are the recent ones, and a plain
     # truncate would drop exactly the line that tripped it.
@@ -164,48 +165,87 @@ class LogSink:
         self.path = None
         self.note = ""
         self.f = None
+        self.failed = None
+        # write() is called from the main loop AND from FeedProcess's pump
+        # thread; the tail wrap is a read-modify-write, and an unlocked
+        # writer landing inside it gets flushed to offset 0 and then
+        # truncated away — the QA pass demonstrated it eating the
+        # supervisor's own "feed exited" line, the one line a mailed-in
+        # log exists to carry.
+        self._lock = threading.Lock()
         if mode == "off":
             return
-        os.makedirs(directory, exist_ok=True)
-        if mode == "tail":
-            self.path = os.path.join(directory, self.NAME)
-            try:
-                # w+ because the wrap below reads back what it keeps
-                self.f = open(self.path, "w+", encoding="utf-8")
-            except OSError:
-                # Windows: a viewer holding the file locks it. Keep the
-                # session alive on a timestamped file and say so.
-                self.mode = "full"
-                self.note = (f"  ({self.NAME} is locked by another "
-                             f"program — keeping a full log this session)")
-        if self.mode == "full":
-            name = f"supervisor-{now().strftime('%Y%m%d-%H%M%S')}.log"
-            self.path = os.path.join(directory, name)
-            self.f = open(self.path, "a", encoding="utf-8")
+        try:
+            os.makedirs(directory, exist_ok=True)
+            if mode == "tail":
+                self.path = os.path.join(directory, self.NAME)
+                # The previous session survives one generation as
+                # supervisor-prev.log: restarting the supervisor is the
+                # first thing a person does when something goes wrong,
+                # and it must not erase the reason they restarted it.
+                # Rotation and open share the fallback: a locked file
+                # refuses either one, and both deserve the same answer.
+                try:
+                    if os.path.exists(self.path):
+                        os.replace(self.path,
+                                   os.path.join(directory, self.PREV))
+                    # w+ because the wrap below reads back what it keeps
+                    self.f = open(self.path, "w+", encoding="utf-8")
+                except OSError:
+                    # Windows: a viewer holding the file locks it. Keep
+                    # the session alive on a timestamped file and say so.
+                    self.mode = "full"
+                    self.note = (f"  ({self.NAME} is locked by another "
+                                 f"program — keeping a full log this "
+                                 f"session)")
+            if self.f is None:
+                name = f"supervisor-{now().strftime('%Y%m%d-%H%M%S')}.log"
+                self.path = os.path.join(directory, name)
+                self.f = open(self.path, "a", encoding="utf-8")
+        except OSError as e:
+            # The status file and console echo are the product here; the
+            # disk log must never take the session down.
+            self.failed = str(e)
+            self.f = None
+            self.note = f"  (unavailable: {e} — continuing without one)"
 
     def write(self, s):
         if not self.f:
             return
-        self.f.write(s)
-        if self.mode == "tail" and self.f.tell() > self.CAP:
-            self.f.seek(0)
-            tail = self.f.read()
-            tail = tail[len(tail) // 2:]
-            tail = tail[tail.find("\n") + 1:]  # start on a line boundary
-            self.f.seek(0)
-            self.f.truncate()
-            self.f.write(f"(log wrapped at {iso(now())} — "
-                         f"older lines dropped)\n")
-            self.f.write(tail)
-            self.f.flush()
+        with self._lock:
+            try:
+                self.f.write(s)
+                if self.mode == "tail" and self.f.tell() > self.CAP:
+                    self.f.seek(0)
+                    tail = self.f.read()
+                    tail = tail[len(tail) // 2:]
+                    tail = tail[tail.find("\n") + 1:]  # line boundary
+                    self.f.seek(0)
+                    self.f.truncate()
+                    self.f.write(f"(log wrapped at {iso(now())} — "
+                                 f"older lines dropped)\n")
+                    self.f.write(tail)
+                    self.f.flush()
+            except OSError as e:
+                self.failed = str(e)
+                try:
+                    self.f.close()
+                except Exception:
+                    pass
+                self.f = None
+                print(f"supervisor: disk log failed ({e}) — "
+                      f"continuing without one", flush=True)
 
     def flush(self):
-        if self.f:
-            self.f.flush()
+        with self._lock:
+            if self.f:
+                self.f.flush()
 
     def close(self):
-        if self.f:
-            self.f.close()
+        with self._lock:
+            if self.f:
+                self.f.close()
+                self.f = None
 
 
 class Status:
@@ -469,8 +509,21 @@ def main():
     if feed_args and feed_args[0] == "--":
         feed_args = feed_args[1:]
 
+    # A --config typed after the -- would govern the feed but not this
+    # process — two processes on different files is a bug report nobody
+    # can reproduce. Refuse rather than split.
+    if any(a == "--config" or a.startswith("--config=") for a in feed_args):
+        sys.exit("supervisor: put --config BEFORE the -- separator — one "
+                 "config file governs both the supervisor and the feed")
+
     argv = build_feed_argv(args, feed_args)
-    replay = any(a == "--replay" or a.startswith("--replay=") for a in feed_args)
+    # Replay drives the status file's honesty and the stall-kill
+    # exemption, and it can arrive from config.json as well as the
+    # command line — so ask the feed's own parser what it will decide,
+    # rather than string-matching argv and missing the config path.
+    # argv[3:] is exactly the child's command line (after
+    # [python, -u, feed]), including any forwarded --config.
+    replay = bool(resolved_defaults("obd_feed", argv[3:]).replay)
 
     log_file = LogSink(args.log_dir, args.run_log)
 
@@ -509,7 +562,8 @@ def main():
         f"supervisor: watching {' '.join(argv)}",
         f"supervisor: status  -> {args.status_file}",
         f"supervisor: log     -> {log_file.path or '(off)'}"
-        + ("  (tail of this session; --run-log full to keep)"
+        + (f"  (this session only; previous kept at {LogSink.PREV}; "
+           f"--run-log full to keep everything)"
            if log_file.mode == "tail" else "") + log_file.note,
         f"supervisor: stalled after {args.stall_seconds:g}s without data; "
         f"kill-and-restart a wedged feed after {stall_restart}",

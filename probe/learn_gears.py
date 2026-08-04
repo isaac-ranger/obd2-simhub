@@ -136,8 +136,12 @@ def build_parser():
     ap.add_argument("log", help="CSV from obd_probe.py --log")
     ap.add_argument("--gears", type=int, default=6,
                     help="expected gear count, 0 = no expectation (default 6)")
+    # A verb, not a setting: configured, it would rewrite the calibration
+    # on every learn run — a write to the one file a drive paid for should
+    # always be asked for out loud.
     ap.add_argument("--write", metavar="CALIBRATION_JSON",
-                    help="update this calibration file's gears section in place")
+                    help="update this calibration file's gears section "
+                         "in place").per_run = True
     return ap
 
 

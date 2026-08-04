@@ -182,16 +182,141 @@ else:
 try:
     parse_with_config(obd_probe.build_parser(), "obd_probe",
                       argv=["--conf", cfg_file({"common": {"port": "COM9"}})])
-    ok("abbreviated --config is refused", False,
+    ok("abbreviated options are refused outright", False,
        "parsed against the wrong defaults")
-except SystemExit as e:
-    ok("abbreviated --config is refused", "spell --config" in str(e), str(e))
+except SystemExit:
+    # allow_abbrev=False: argparse itself rejects the abbreviation, which
+    # protects every option, not just --config
+    ok("abbreviated options are refused outright", True)
+
+try:
+    parse(obd_feed.build_parser, "obd_feed",
+          {"obd_feed": {"replay": "d.csv"}}, argv=["--po", "COM7"])
+    ok("abbreviation can't smuggle the file past the referee", False,
+       "a config replay would have beaten a typed --po port")
+except SystemExit:
+    ok("abbreviation can't smuggle the file past the referee", True)
 
 try:
     parse_with_config(obd_feed.build_parser(), "not_a_tool", argv=[])
     ok("unregistered tool name is a programmer error", False)
 except ValueError as e:
     ok("unregistered tool name is a programmer error", "TOOLS" in str(e))
+
+# --- JSON types that don't fit are named, not smuggled --------------------------
+
+print("value types:")
+
+refuses("null is refused with the fix named",
+        obd_feed.build_parser, "obd_feed",
+        {"obd_feed": {"dwell": None}}, saying=["null", "delete the key"])
+
+refuses("a list where a value belongs",
+        obd_feed.build_parser, "obd_feed",
+        {"common": {"port": ["COM3"]}}, saying=["port", "list"])
+
+refuses("an object where a value belongs",
+        obd_probe.build_parser, "obd_probe",
+        {"obd_probe": {"baud": {"x": 1}}}, saying=["baud", "object"])
+
+refuses("true on a numeric option",
+        obd_probe.build_parser, "obd_probe",
+        {"obd_probe": {"baud": True}}, saying=["baud", "true/false"])
+
+refuses("a float on an int option",
+        obd_probe.build_parser, "obd_probe",
+        {"obd_probe": {"baud": 115200.9}}, saying=["baud", "whole number"])
+
+refuses("a bare number on a text option says quote it",
+        obd_feed.build_parser, "obd_feed",
+        {"common": {"port": 3}}, saying=["port", "quote it"])
+
+args = parse(obd_feed.build_parser, "obd_feed", {"obd_feed": {"dwell": 2}})
+ok("an int lands on a float option", args.dwell == 2, f"dwell={args.dwell!r}")
+
+refuses("a backslash-mangled Windows path is caught",
+        obd_feed.build_parser, "obd_feed",
+        {"obd_feed": {"log_dir": "D:\runs"}},          # \r became a real CR
+        saying=["log_dir", "control character", "\\\\"])
+
+# --- verbs are actions, not settings --------------------------------------------
+
+print("verbs:")
+
+refuses("register can't be configured",
+        obd_feed.build_parser, "obd_feed",
+        {"obd_feed": {"register": True}}, saying=["register", "action"])
+
+refuses("list_ports can't be configured, even from common",
+        obd_feed.build_parser, "obd_feed",
+        {"common": {"list_ports": True}}, saying=["list_ports", "action"])
+
+refuses("learn_gears --write can't be configured",
+        learn_gears.build_parser, "learn_gears",
+        {"learn_gears": {"write": "calibration.json"}},
+        argv=["drive.csv"], saying=["write", "action"])
+
+# --- files the real world produces ----------------------------------------------
+
+print("encodings and shapes:")
+
+_p = cfg_file("")  # placeholder to get a path; rewrite it as UTF-16
+with open(_p, "w", encoding="utf-16") as f:
+    f.write('{"common": {"port": "COM3"}}')
+try:
+    parse_with_config(obd_feed.build_parser(), "obd_feed", argv=["--config", _p])
+    ok("UTF-16 config refuses in plain words", False, "parsed happily")
+except SystemExit as e:
+    ok("UTF-16 config refuses in plain words",
+       "UTF-8" in str(e) and "Traceback" not in str(e), str(e))
+
+_p = cfg_file("")
+with open(_p, "w", encoding="utf-8-sig") as f:
+    f.write('{"common": {"port": "COM3"}}')
+args = parse_with_config(obd_feed.build_parser(), "obd_feed",
+                         argv=["--config", _p])
+ok("UTF-8 with BOM (what Notepad writes) just works", args.port == "COM3")
+
+refuses("duplicate keys are refused, not last-wins",
+        obd_feed.build_parser, "obd_feed",
+        '{"common": {"port": "COM3", "port": "COM4"}}',
+        saying=["duplicate", "port"])
+
+# --- a broken config never blocks the manual ------------------------------------
+
+print("help:")
+
+import io
+import contextlib
+_help_out = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_help_out):
+        parse_with_config(obd_feed.build_parser(), "obd_feed",
+                          argv=["--help",
+                                "--config",
+                                cfg_file({"obd_feed": {"bogus": 1}})])
+    ok("--help with a broken config", False, "parse returned?")
+except SystemExit as e:
+    ok("--help with a broken config still prints help",
+       str(e) in ("0", "None") and "--run-log" in _help_out.getvalue(),
+       f"exit={e!r} (nonzero = config blocked it)")
+
+# --- a typo in another tool's section speaks today, refuses on its own day ------
+
+print("cross-section:")
+
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    args = parse(obd_feed.build_parser, "obd_feed",
+                 {"supervisor": {"quiett": True}})
+ok("foreign-section typo warns at every start",
+   "quiett" in _err.getvalue() and "quiet" in _err.getvalue(),
+   f"stderr={_err.getvalue()!r}")
+ok("...but does not block the running tool", args is not None)
+
+refuses("...and refuses when its own tool runs",
+        supervisor_mod.build_parser, "supervisor",
+        {"supervisor": {"quiett": True}}, saying=["quiett", "quiet"])
 
 # --- the supervisor: parse_known_args, and the file it hands its child ----------
 
@@ -211,15 +336,29 @@ argv = supervisor_mod.build_feed_argv(args, ["--port", "x"])
 ok("non-default config is forwarded to the feed",
    "--config" in argv and custom in argv, f"argv={argv!r}")
 
-args2, _ = parse_with_config(supervisor_mod.build_parser(), "supervisor",
-                             argv=[], known=True)
-argv2 = supervisor_mod.build_feed_argv(args2, ["--port", "x"])
-ok("default config is not forwarded (the feed finds it itself)",
-   "--config" not in argv2, f"argv={argv2!r}")
+if not os.path.exists(default_config_path()):
+    args2, _ = parse_with_config(supervisor_mod.build_parser(), "supervisor",
+                                 argv=[], known=True)
+    argv2 = supervisor_mod.build_feed_argv(args2, ["--port", "x"])
+    ok("default config is not forwarded (the feed finds it itself)",
+       "--config" not in argv2, f"argv={argv2!r}")
+else:
+    print("  (skip: repo has a real config.json — default-forwarding case "
+          "not testable here)")
 
 argv3 = supervisor_mod.build_feed_argv(args, ["--config", "theirs.json"])
 ok("an explicit feed --config is not overridden",
    argv3.count("--config") == 1 and "theirs.json" in argv3, f"argv={argv3!r}")
+
+replay_cfg = cfg_file({"obd_feed": {"replay": "reports/x.csv"}})
+ns = obd_config.resolved_defaults("obd_feed", ["--config", replay_cfg])
+ok("the supervisor can see a replay that lives only in the file",
+   ns.replay == "reports/x.csv", f"replay={ns.replay!r}")
+ns = obd_config.resolved_defaults("obd_feed",
+                                  ["--config", replay_cfg, "--port", "COM3"])
+ok("...and a typed port still beats it in the resolver",
+   ns.port == "COM3" and ns.replay is None,
+   f"port={ns.port!r} replay={ns.replay!r}")
 
 # --- the registry: every section name maps to a parser that answers -------------
 
@@ -227,11 +366,16 @@ print("registry:")
 
 for tool in obd_config.TOOLS:
     try:
-        dests = obd_config._tool_dests(tool)
-        ok(f"{tool} answers for its keys", bool(dests),
-           "" if dests else "no configurable options?")
+        settings, verbs = obd_config._tool_surface(tool)
+        ok(f"{tool} answers for its keys", bool(settings),
+           "" if settings else "no configurable options?")
     except Exception as e:
         ok(f"{tool} answers for its keys", False, f"{type(e).__name__}: {e}")
+
+ok("the verbs are marked where they live",
+   obd_config._tool_surface("obd_feed")[1] == {"register", "list_ports"}
+   and obd_config._tool_surface("learn_gears")[1] == {"write"}
+   and obd_config._tool_surface("obd_probe")[1] == {"list_ports"})
 
 
 print()

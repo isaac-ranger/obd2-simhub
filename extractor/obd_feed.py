@@ -551,54 +551,98 @@ class RunLog:
             (0x0E, "timing_deg")]
 
     TAIL_NAME = "feed-last.csv"
-    # ~3.5 hours of samples. When the cap trips, the OLDEST half goes and
-    # the newest half stays — never less than ~1.75h of recent history on
-    # disk, and never a file that grows past the cap. A plain truncate
-    # would be simpler and wrong: it drops everything at the boundary,
-    # including the row that tripped it, and the moment just before a
-    # wrap is a moment like any other — the funny thing is allowed to
-    # happen there too.
+    PREV_NAME = "feed-prev.csv"
+    # ~6.5 hours of samples at real-car rates (drive_02 measured: 4.78 Hz,
+    # ~45 B/row with the rotating channels partly empty), floor ~3.2h right
+    # after a wrap. When the cap trips, the OLDEST half goes and the newest
+    # half stays. A plain truncate would be simpler and wrong: it drops
+    # everything at the boundary, including the row that tripped it, and
+    # the moment just before a wrap is a moment like any other — the funny
+    # thing is allowed to happen there too.
     TAIL_CAP = 5 * 1024 * 1024
 
     def __init__(self, directory, mode="full"):
         self.mode = mode
-        self.path = None
+        self.dir = directory
         self.note = ""
         self.f = None
-        if mode == "off":
-            return
-        os.makedirs(directory, exist_ok=True)
+        self.failed = None
+        # Nothing is created, rotated, or truncated until the first sample
+        # actually lands (_open, from row). A run that never hears the car
+        # — wrong port, adapter unplugged, a supervisor crash-loop retrying
+        # every few seconds — must not cost you the log of the run that
+        # did. The QA pass caught the old eager open doing exactly that:
+        # truncating the evidence of a failure two seconds after the
+        # supervisor restarted the feed to recover from it.
         if mode == "tail":
             self.path = os.path.join(directory, self.TAIL_NAME)
-            try:
-                # w+ because the wrap below reads back what it keeps
-                self.f = open(self.path, "w+", encoding="ascii", newline="")
-            except OSError:
-                # Windows: a viewer holding feed-last.csv (Excel does)
-                # locks it. Crashing at startup over a spreadsheet is the
-                # wrong trade at an event — fall back to a timestamped
-                # file for this run and say so.
-                self.mode = "full"
-                self.note = (f"  ({self.TAIL_NAME} is locked by another "
-                             f"program — keeping a full log this run)")
-        if self.mode == "full":
-            name = time.strftime("feed-%Y%m%d-%H%M%S.csv")
-            self.path = os.path.join(directory, name)
-            self.f = open(self.path, "w", encoding="ascii", newline="")
-        self._header()
+        elif mode == "full":
+            self.path = os.path.join(directory,
+                                     time.strftime("feed-%Y%m%d-%H%M%S.csv"))
+        else:
+            self.path = None
+
+    def _open(self):
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            if self.mode == "tail":
+                # One generation back instead of gone: the previous run
+                # survives as feed-prev.csv until the NEXT data-bearing
+                # run starts. Bounded at two files, nothing accumulates.
+                # Rotation and open share the fallback: a locked file
+                # refuses either one, and both deserve the same answer.
+                prev = os.path.join(self.dir, self.PREV_NAME)
+                try:
+                    if os.path.exists(self.path):
+                        os.replace(self.path, prev)
+                    # w+ because the wrap below reads back what it keeps
+                    self.f = open(self.path, "w+", encoding="ascii",
+                                  newline="")
+                except OSError:
+                    # Windows: a viewer holding feed-last.csv (Excel does)
+                    # locks it. Losing the run over a spreadsheet is the
+                    # wrong trade at an event — fall back to a timestamped
+                    # file and say so.
+                    self.mode = "full"
+                    self.path = os.path.join(
+                        self.dir, time.strftime("feed-%Y%m%d-%H%M%S.csv"))
+                    self.note = (f"({self.TAIL_NAME} is locked by another "
+                                 f"program — keeping a full log at "
+                                 f"{self.path} this run)")
+                    print(f"run log: {self.note}", flush=True)
+            if self.f is None:
+                self.f = open(self.path, "w", encoding="ascii", newline="")
+            self._header()
+        except OSError as e:
+            # The log is a diagnostic; the feed is the product. A full
+            # disk or a bad log_dir must never take the overlays down.
+            self.failed = str(e)
+            self.f = None
+            print(f"run log unavailable ({e}) — continuing without one",
+                  flush=True)
 
     def _header(self):
         self.f.write("t_s,gear," + ",".join(c for _p, c in self.COLS) + "\n")
 
     def row(self, t, gear, decoded):
-        if not self.f:
+        if self.mode == "off" or self.failed:
             return
+        if self.f is None:
+            self._open()
+            if self.f is None:
+                return
         cells = [f"{decoded[p]:.1f}" if p in decoded else ""
                  for p, _c in self.COLS]
-        self.f.write(f"{t:.3f},{gear}," + ",".join(cells) + "\n")
-        self.f.flush()
-        if self.mode == "tail" and self.f.tell() > self.TAIL_CAP:
-            self._wrap()
+        try:
+            self.f.write(f"{t:.3f},{gear}," + ",".join(cells) + "\n")
+            self.f.flush()
+            if self.mode == "tail" and self.f.tell() > self.TAIL_CAP:
+                self._wrap()
+        except OSError as e:
+            self.failed = str(e)
+            print(f"run log write failed ({e}) — continuing without one",
+                  flush=True)
+            self.close()
 
     def _wrap(self):
         self.f.seek(0)
@@ -615,12 +659,25 @@ class RunLog:
         if not self.path:
             return "(off)"
         if self.mode == "tail":
-            return f"{self.path}  (tail of this run; --run-log full to keep)"
-        return self.path + self.note
+            return (f"{self.path}  (tail of this run; previous run kept at "
+                    f"{self.PREV_NAME}; --run-log full to keep everything)")
+        return self.path + ("  " + self.note if self.note else "")
 
     def kept(self):
-        """For exit messages: where the data went, if anywhere."""
-        return f"Log kept: {self.path}" if self.path else "Run log was off."
+        """For exit messages: where the data went, if anywhere. In tail
+        mode the honest verb is 'at', not 'kept' — the next data-bearing
+        start rotates it to feed-prev.csv and the one after that eats it."""
+        if self.mode == "off":
+            return "Run log was off."
+        if self.failed:
+            return "Run log was unavailable this run."
+        if self.f is None:
+            return "No samples arrived, so no log was written (previous log untouched)."
+        if self.mode == "tail":
+            return (f"Log at {self.path} — one more run keeps it as "
+                    f"{self.PREV_NAME}, two overwrite it; copy it out to "
+                    f"keep it for good.")
+        return f"Log kept: {self.path}"
 
     def close(self):
         try:
@@ -751,6 +808,13 @@ def poll_replay(args, state, run_log, sender):
         sys.exit(f"{args.replay}: no usable samples (need t_s,rpm,speed_kmh)")
     print(f"Replaying {len(rows)} samples from {args.replay} "
           f"at {args.speed:g}x...")
+    # A wrapped tail log starts mid-drive; pace from its first row rather
+    # than sleeping until the recording's own clock catches up (at the
+    # 5MB cap that silence would be measured in hours).
+    t_base = rows[0][0]
+    if t_base > 1.0:
+        print(f"  (log begins at t={t_base:.0f}s — earlier samples were "
+              f"dropped by the tail cap; pacing from there)")
     units = args.resolved_units
     t_start = time.perf_counter()
     last_status = 0.0
@@ -758,7 +822,7 @@ def poll_replay(args, state, run_log, sender):
         if sender.fatal is not None:
             print(f"\nfeed stopped (sender): {sender.fatal}")
             return 1
-        target = t_start + t_s / args.speed
+        target = t_start + (t_s - t_base) / args.speed
         delay = target - time.perf_counter()
         if delay > 0:
             time.sleep(delay)
@@ -850,9 +914,15 @@ def build_parser():
                          "'full' keeps a timestamped file per run (drives "
                          "you mean to keep, gear learning, development); "
                          "'off' writes nothing")
+    # Verbs, not settings: each of these is an action you take once, and a
+    # config file that performed it on every start would be a haunting
+    # (register-and-exit in a supervisor restart loop, most notably).
+    # per_run marks them un-configurable; the reasoning is the same one
+    # that excludes positionals.
     ap.add_argument("--register", action="store_true",
-                    help="write the SimHub .simlink registration and exit")
-    ap.add_argument("--list-ports", action="store_true")
+                    help="write the SimHub .simlink registration and exit"
+                    ).per_run = True
+    ap.add_argument("--list-ports", action="store_true").per_run = True
     ap.add_argument("--debug", action="store_true",
                     help="dump raw adapter traffic on exit")
     return ap
@@ -925,9 +995,29 @@ def main():
     sender = Sender(state, packer, host, port,
                     is_replay=bool(args.replay))
     run_log = RunLog(args.log_dir, args.run_log)
+    print(f"Source    -> "
+          + (f"replay {args.replay}" if args.replay else args.port))
     print(f"UDP feed  -> {host}:{port}  ({packer.size} bytes/packet at "
           f"{SEND_HZ:.0f} Hz)")
     print(f"Run log   -> {run_log.describe()}")
+    if args.run_log == "tail":
+        # The default used to be a timestamped file per run, kept forever.
+        # Anyone upgrading with a runs/ full of them was relying on that —
+        # say so while the evidence of the old habit is still on disk.
+        try:
+            old = [n for n in os.listdir(args.log_dir)
+                   if n.startswith("feed-2") and n.endswith(".csv")]
+        except OSError:
+            old = []
+        if old:
+            n = len(old)
+            print(f"note: run logs no longer accumulate — this run "
+                  f"overwrites {RunLog.TAIL_NAME} (one previous run kept "
+                  f"as {RunLog.PREV_NAME}). Your {n} older "
+                  f"feed-*.csv file{'' if n == 1 else 's'} "
+                  f"{'is' if n == 1 else 'are'} untouched; "
+                  f"\"run_log\": \"full\" in config.json restores the old "
+                  f"behavior.")
     print(f"Units     -> {args.resolved_units}   "
           f"tire set -> {active} (speed factor {speed_factor:g})")
     print(f"Dash gear -> {args.dash_gear}"
