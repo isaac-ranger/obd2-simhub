@@ -282,6 +282,10 @@ refuses("duplicate keys are refused, not last-wins",
         '{"common": {"port": "COM3", "port": "COM4"}}',
         saying=["duplicate", "port"])
 
+refuses("NaN is refused (a NaN dwell would freeze the gear readout silently)",
+        obd_feed.build_parser, "obd_feed",
+        '{"obd_feed": {"dwell": NaN}}', saying=["NaN"])
+
 # --- a broken config never blocks the manual ------------------------------------
 
 print("help:")

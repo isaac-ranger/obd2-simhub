@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -100,11 +101,11 @@ with open(CFG_FIXTURE, "w", encoding="utf-8") as _f:
     _f.write("{}\n")
 
 
-def run_supervisor(tmp, stub, extra=(), settle=2.0):
+def run_supervisor(tmp, stub, extra=(), settle=2.0, config=None):
     """Launch the supervisor on a stub feed, let it settle, return (proc, status_path)."""
     status_path = os.path.join(tmp, "obd2_status.json")
     argv = [sys.executable, "-u", SUP,
-            "--config", CFG_FIXTURE,
+            "--config", config or CFG_FIXTURE,
             "--status-file", status_path,
             "--status-interval", "0.15",
             "--stall-seconds", "1",
@@ -447,6 +448,51 @@ dead.close()
 ok("an impossible log dir disables the disk log, never the session",
    dead.f is None and dead.failed is not None and "unavailable" in dead.note,
    f"failed={dead.failed!r} note={dead.note!r}")
+
+print("\nlog sink — the failure race the gate caught")
+# The OSError handler nulls self.f under the lock; a writer that checked
+# f OUTSIDE the lock would pass a stale check and crash on None. This
+# drives that interleaving deterministically: hold the lock, let a writer
+# queue up behind it, null f, release. The fixed code exits quietly; the
+# buggy code dies with AttributeError in whichever thread lost the race —
+# and from the pump thread that death wedges the whole feed.
+tmp = tempfile.mkdtemp()
+sink = LogSink(tmp, "tail")
+sink.write("alive\n")
+_crashes = []
+def _late_writer():
+    try:
+        sink.write("late writer\n")
+    except BaseException as e:
+        _crashes.append(repr(e))
+sink._lock.acquire()
+_t = threading.Thread(target=_late_writer)
+_t.start()
+time.sleep(0.3)                      # writer is now queued behind the lock
+_held = sink.f
+sink.f = None                        # what the failure handler does, locked
+sink._lock.release()
+_t.join(timeout=5)
+ok("a writer that raced the failure handler exits quietly, never crashes",
+   not _crashes and not _t.is_alive(), f"{_crashes}")
+_held.close()
+
+print("\nreplay honesty — the supervisor asks the feed's own parser")
+# A replay can arrive from config.json with an empty command line; the
+# status file (and the stall-kill exemption) must see it anyway. This is
+# the integration the mutation run proved untested: resolved_defaults as
+# a function passed while a reverted string-match in main went unnoticed.
+tmp = tempfile.mkdtemp()
+replay_cfg = os.path.join(tmp, "config.json")
+with open(replay_cfg, "w", encoding="utf-8") as f:
+    json.dump({"obd_feed": {"replay": "reports/x.csv"}}, f)
+proc, sp = run_supervisor(tmp, write_stub(tmp, "alive.py", STUB_ALIVE),
+                          settle=1.5, config=replay_cfg)
+s = read_status(sp)
+ok("a config-file replay is reported as replay mode, empty CLI and all",
+   s["detail"]["mode"] == "replay", s["detail"]["mode"])
+proc.kill()
+proc.wait()
 
 print("\nstaleness contract")
 tmp = tempfile.mkdtemp()

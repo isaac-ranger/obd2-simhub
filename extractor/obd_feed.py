@@ -552,9 +552,9 @@ class RunLog:
 
     TAIL_NAME = "feed-last.csv"
     PREV_NAME = "feed-prev.csv"
-    # ~6.5 hours of samples at real-car rates (drive_02 measured: 4.78 Hz,
-    # ~45 B/row with the rotating channels partly empty), floor ~3.2h right
-    # after a wrap. When the cap trips, the OLDEST half goes and the newest
+    # ~6.8 hours of samples at real-car rates (drive_02 measured: 4.78 Hz,
+    # ~45 B/row with the rotating channels partly empty; 5 MiB / 45 B
+    # / 4.78 Hz), floor ~3.4h right after a wrap. When the cap trips, the OLDEST half goes and the newest
     # half stays. A plain truncate would be simpler and wrong: it drops
     # everything at the boundary, including the row that tripped it, and
     # the moment just before a wrap is a moment like any other — the funny

@@ -216,6 +216,28 @@ ok("cli: missing calibration degrades, still exits 0",
    proc.returncode == 0 and "no calibration" in proc.stdout,
    proc.stdout[-400:])
 
+# A tail-capped log starts mid-drive; the report must say so instead of
+# describing half a session as a whole one (warm-up on a log that starts
+# warm reads as a car that never warmed). The mutation run proved this
+# NOTE had no test at all.
+wrapped = os.path.join(tempfile.mkdtemp(), "wrapped.csv")
+with open(wrapped, "w", newline="") as f:
+    f.write("t_s,rpm,speed_kmh\n")
+    for i in range(300):
+        f.write(f"{900 + i * 0.2:.1f},{2000 + (i % 50) * 10},{60 + (i % 20)}\n")
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+                       "--config", CFG_FIXTURE, wrapped],
+                      capture_output=True, text=True)
+ok("cli: a mid-drive log gets the tail-cap NOTE",
+   proc.returncode == 0 and "begins at t=900" in proc.stdout,
+   proc.stdout[:300])
+proc = subprocess.run([sys.executable, os.path.join(HERE, "report.py"),
+                       "--config", CFG_FIXTURE, DRIVE2],
+                      capture_output=True, text=True)
+ok("cli: a whole log gets no NOTE",
+   proc.returncode == 0 and "begins at" not in proc.stdout,
+   proc.stdout[:200])
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {FAILED}")

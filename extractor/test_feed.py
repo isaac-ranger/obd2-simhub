@@ -298,6 +298,31 @@ ok("honest log: judge confirmed 2nd before the coast",
 ok("honest log: settled coast logs N while the dash holds 2nd",
    _coast and all(g == 0 for g in _coast) and _st.gear_display == 2,
    f"coast rows {_coast}, dash {_st.gear_display}")
+
+# A wrapped tail log starts mid-drive; replay must pace from its first row,
+# not sleep until the recording's own clock catches up. Unrebased, this
+# file sleeps toward t=5000s (5s wall even at 1000x) before its first
+# packet; rebased it finishes in well under a second. The 3s bound leaves
+# room for a slow bench and none for the bug.
+_late = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                    newline="")
+_late.write("t_s,rpm,speed_kmh,throttle_pct\n")
+_t = 5000.0
+for _i in range(10):
+    _late.write(f"{_t:.3f},{CONSTANTS[1] * 40.0:.1f},40,20\n")
+    _t += 0.2
+_late.close()
+_st3 = CarState(GearWatch(CONSTANTS, TOL))
+_rl3 = RunLog(tempfile.mkdtemp(), "off")
+_snd3 = _types.SimpleNamespace(fatal=None, sent=0, errors=0)
+_args3 = _types.SimpleNamespace(replay=_late.name, speed=1000.0,
+                                resolved_units="metric")
+_t0 = time.time()
+poll_replay(_args3, _st3, _rl3, _snd3)
+_elapsed = time.time() - _t0
+ok("replay: a mid-drive log plays immediately (t rebased to first row)",
+   _elapsed < 3.0,
+   f"{_elapsed:.1f}s — sleeping toward t=5000 means the rebase is gone")
 os.unlink(_mini.name)
 
 # --- packer: the real SimHub contract ----------------------------------------

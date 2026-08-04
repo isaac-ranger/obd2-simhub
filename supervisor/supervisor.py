@@ -210,9 +210,14 @@ class LogSink:
             self.note = f"  (unavailable: {e} — continuing without one)"
 
     def write(self, s):
-        if not self.f:
-            return
         with self._lock:
+            # The liveness check lives INSIDE the lock: the failure
+            # handler below nulls self.f under this same lock, and a
+            # writer that checked outside could pass a stale check and
+            # crash on None — disk-full hits both writer threads at
+            # once, which is exactly the shape the QA gate caught.
+            if not self.f:
+                return
             try:
                 self.f.write(s)
                 if self.mode == "tail" and self.f.tell() > self.CAP:

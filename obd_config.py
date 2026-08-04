@@ -192,6 +192,10 @@ def _config_path_from(argv):
     return path, explicit
 
 
+def _no_json_constants(name):
+    raise ValueError(f"{name} is not a number a settings file can hold")
+
+
 def _no_duplicate_keys(pairs):
     """JSON silently last-wins on duplicate keys; 'silently' is the part
     this layer exists to kill."""
@@ -221,7 +225,10 @@ def _load(path, explicit):
     except OSError as e:
         sys.exit(f"config error: cannot read {path}: {e}")
     try:
-        cfg = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+        # parse_constant: Python's json quietly accepts NaN/Infinity, and a
+        # NaN dwell would freeze the gear readout forever with no error.
+        cfg = json.loads(text, object_pairs_hook=_no_duplicate_keys,
+                         parse_constant=_no_json_constants)
     except json.JSONDecodeError as e:
         sys.exit(f"config error ({path}): not valid JSON — line {e.lineno} "
                  f"column {e.colno}: {e.msg}")
