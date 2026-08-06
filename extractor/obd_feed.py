@@ -396,7 +396,21 @@ class Packer:
         if src == "derived:gear_text":
             return gear_char(snap.get("gear_display", snap["gear"]))
         if src == "derived:throttle_01":
-            return float(snap["pids"].get(0x11, 0.0)) / 100.0
+            # The pedal PID does not rest at 0 or reach 100 on a real car —
+            # it idles around 12-17% and stops at a plate wall well under
+            # 100%. calibration.json's throttle section maps its useful
+            # span onto the full 0..1 the overlay expects; absent that
+            # section the defaults below are the identity map, i.e. exactly
+            # the raw/100 this line used to be.
+            raw = float(snap["pids"].get(0x11, 0.0))
+            lo = float(self.cal.get("throttle_floor_pct", 0.0))
+            hi = float(self.cal.get("throttle_ceiling_pct", 100.0))
+            if hi <= lo:
+                raise LayoutError(
+                    f"calibration throttle.ceiling_pct ({hi}) must be above "
+                    f"throttle.floor_pct ({lo}) — that map has no span. Run "
+                    "probe/learn_throttle.py on a drive log.")
+            return min(1.0, max(0.0, (raw - lo) / (hi - lo)))
         if src == "derived:ignition_on":
             return 1 if snap["pids"] else 0
         if src == "derived:engine_started":
@@ -972,10 +986,22 @@ def main():
                      speed_factor=speed_factor,
                      display_hold=(args.dash_gear == "hold"))
     engine = calibration.get("engine", {})
+    # Absent a throttle section, 0..100 is the identity map: the feed sends
+    # the raw pedal percentage exactly as it did before calibration existed.
+    throttle = calibration.get("throttle", {})
+    thr_floor = float(throttle.get("floor_pct", 0.0))
+    thr_ceiling = float(throttle.get("ceiling_pct", 100.0))
+    if thr_ceiling <= thr_floor:
+        sys.exit(f"{args.calibration}: throttle.ceiling_pct "
+                 f"({thr_ceiling}) must be above throttle.floor_pct "
+                 f"({thr_floor}) — that map has no span. Re-run "
+                 "probe/learn_throttle.py on a drive log.")
     packer = Packer(layout, cal={
         "max_gears": len(constants),
         "max_rpm": float(engine.get("max_rpm", 0.0)),
         "fuel_tank_l": float(engine.get("fuel_tank_l", 0.0)),
+        "throttle_floor_pct": thr_floor,
+        "throttle_ceiling_pct": thr_ceiling,
     })
 
     udp_cfg = layout.get("udp", {})

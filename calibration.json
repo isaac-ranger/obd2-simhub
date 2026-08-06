@@ -26,7 +26,14 @@
     }
   },
   "gears": {
-    "rpm_per_kmh": [103.0, 60.4, 43.3, 35.0, 29.2, 25.2],
+    "rpm_per_kmh": [
+      103.0,
+      60.4,
+      43.3,
+      35.0,
+      29.2,
+      25.2
+    ],
     "tolerance_pct": 7,
     "learned_from": "reports/2026-07-31-kris-drive_01.csv",
     "learned_on": "2026-07-31"
@@ -37,6 +44,14 @@
     "engine": "max_rpm: 982 GTS 4.0 spec redline (owner's 7,622 pull 'not high enough to engage the rev limiter' agrees). fuel_tank_l: 64 L / 16 gal, owner-stated (2026-07-31 email) — the owner's number outranks the spec sheet here. Feeds SimHub's EngineMaxRpm/MaxFuel and the Fuel percent-to-liters conversion.",
     "speed_factor": "true speed = OBD-reported speed * speed_factor. The ECU assumes a fixed tire circumference; smaller tires make it over-report. Factors here are rear-diameter ratios vs stock; a GPS-vs-OBD-speed check at steady highway speed would pin them tighter (not GPS-vs-dash: the dash speedometer carries its own deliberate over-read that this factor is never applied to).",
     "gears": "rpm_per_kmh per gear, 1st..6th, learned from a real drive log by probe/learn_gears.py. Tire-independent: OBD speed and rpm both live upstream of actual tire size, so these never change with a wheel swap.",
+    "throttle": "floor_pct/ceiling_pct map the pedal PID's real span onto the 0-100% the overlay expects, learned from a drive log by probe/learn_throttle.py. The feed applies out = clamp((raw - floor) / (ceiling - floor), 0, 1) at extractor/obd_feed.py. Delete this whole section and the feed sends raw/100 exactly as it did before calibration existed — 0 and 100 are the identity map. floor: the plate rests ABOVE zero with your foot off, and higher while coasting (16.5) than at a standstill (12.5), so the coast figure is the one that zeroes both. Lower it toward 12.5 if you'd rather see a little throttle at idle than a hard zero. ceiling: the plate physically stops at measured_wall_pct (88.6 here, raw byte 226) and an uncalibrated feed therefore CANNOT reach 100% on any pull; the ceiling sits 4% below the wall so a spirited run that stops just short of the stop still reads 100. Raise it toward the wall to clip less often, lower it to clip more. LIMIT: there is no single closed-throttle zero — the coast reading climbs ~16% at 1,500 rpm to ~23% near 7,000, so one floor lands mid-range and leaves a small residual at both ends. learn_throttle.py prints that per-rpm table so you can see how much of it your car has.",
     "tolerance_pct": "a live rpm/speed ratio within this % of a gear's constant reads as that gear; nearest constant wins if bands ever touch; outside every band reads neutral/shifting. The tightest step (5th to 6th, ~15.9%) keeps +/-t bands clear of each other only for t below ~7.3, hence 7. The live readout also needs ~0.35s of steady agreement (time-based, so it can't silently loosen as polling gets faster) before it changes gear, or clutch-in rpm sweeps flash fake gears on every shift."
+  },
+  "throttle": {
+    "floor_pct": 16.5,
+    "ceiling_pct": 85.0,
+    "measured_wall_pct": 88.6,
+    "learned_from": "logs/kris-20260805-sport/feed-20260805-155331.csv",
+    "learned_on": "2026-08-06"
   }
 }

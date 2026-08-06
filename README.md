@@ -74,8 +74,8 @@ rules, all five of them:
 
 * **`common`** holds values shared by more than one tool (the port, the
   baud). A section named after a tool (`obd_feed`, `obd_probe`,
-  `learn_gears`, `fake_car`, `supervisor`, `report`) applies to that tool
-  only, and beats `common`.
+  `learn_gears`, `learn_throttle`, `fake_car`, `supervisor`, `report`)
+  applies to that tool only, and beats `common`.
 * **The command line beats the file.** `--port COM7` on a config that says
   `COM3` means `COM7`, today only. (To keep that promise airtight, option
   abbreviations are off — spell `--port` out, `--po` is refused.)
@@ -176,6 +176,52 @@ py probe\learn_gears.py drive.csv --write calibration.json
 
 The ratio histogram clusters at one spike per gear, and those centers *are*
 your gearbox as the ECU reports it.
+
+### Same drive, second thing to learn: the throttle
+
+The throttle PID doesn't read 0–100 on a real car. Foot completely off, the
+plate still reports somewhere around 12–17%. Wide open, it stops dead well
+short of 100% — on the 718 it never once exceeded **88.6%**, at any rpm, in
+any drive mode, across six logs including a 7,532 rpm pull. Sent straight
+through, an overlay shows moderate throttle while you coast and never reaches
+100% on a pull you buried the pedal for.
+
+Two numbers fix it, from the same log:
+
+```
+py probe\learn_throttle.py drive.csv --write calibration.json
+```
+
+It prints the floor, the ceiling, and **every sample count behind them**, so
+you can see whether your drive earned the answer rather than taking its word:
+
+```
+  measured wall       88.6 %  (160 samples sit exactly on it)
+  ceiling             85.0 %  (wall less 4.0%, rounded down)
+  coast floor         16.5 %  (p10 14.9, p90 18.8, n=592)
+  idle floor          12.5 %  (p10 11.8, p90 15.3, n=5848)
+```
+
+The ceiling sits a few percent **below** the measured wall on purpose: set it
+exactly at the wall and a spirited run that stops just short never reads 100%
+either — the same bug, rarer and harder to notice. The floor comes from
+coasting rather than idling because the two disagree, and coasting is the
+higher of them: zero idle alone and a freeway coast still shows a few percent
+of phantom throttle.
+
+Every selector it uses keys on **load, speed and rpm only — never on
+throttle**. Selecting low-throttle samples and then reporting that throttle
+was low is a circle that produces a confident wrong number.
+
+**The limit, stated plainly:** there is no single closed-throttle zero. The
+resting reading climbs with engine speed (~16% at 1,500 rpm to ~23% near
+7,000 on the reference car), and a two-point map has one floor, so it lands
+mid-range and leaves a small residual at both ends. The tool prints the
+per-rpm table so you can see how much of that your car has. Nothing in this
+shape of calibration can remove it.
+
+Delete the `throttle` section entirely and the feed sends raw ÷ 100 exactly as
+it did before — 0 and 100 are the identity map, so this is safe to skip.
 
 ### Then edit `calibration.json` by hand for:
 
@@ -370,6 +416,7 @@ py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
 
 ```
 py probe\test_parse.py            py probe\test_learn_gears.py
+py probe\test_learn_throttle.py
 py extractor\test_feed.py         py supervisor\test_supervisor.py
 py test_report.py                 py test_config.py
 ```
@@ -390,11 +437,12 @@ Your commute is now a regression test.
 ```
 probe/         obd_probe.py     step 1 — survey + drive logging
                learn_gears.py   step 2 — drive log → gear constants
+               learn_throttle.py  step 2 — drive log → throttle floor/ceiling
 extractor/     obd_feed.py      step 4 — the live feed
                fake_car.py      a car-shaped thing for desk testing
 supervisor/    supervisor.py    step 5 — keeps the feed alive
 simdef/        the SimHub contract
-calibration.json                your car: gears, tires, tank, units
+calibration.json                your car: gears, tires, tank, throttle, units
 config.example.json             copy to config.json: your rig (port, baud)
 obd_config.py                   the config layer every tool loads
 report.py                       post-drive analysis

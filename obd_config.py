@@ -94,6 +94,7 @@ TOOLS = {
     "obd_feed":    ("extractor", "obd_feed.py"),
     "obd_probe":   ("probe", "obd_probe.py"),
     "learn_gears": ("probe", "learn_gears.py"),
+    "learn_throttle": ("probe", "learn_throttle.py"),
     "fake_car":    ("extractor", "fake_car.py"),
     "supervisor":  ("supervisor", "supervisor.py"),
     "report":      ("report.py",),
