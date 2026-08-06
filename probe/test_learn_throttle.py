@@ -64,9 +64,19 @@ mixed = [
     row(2500, 30.0, 16.0, 2.0),     # unloaded but too slow to count
     row(3000, 90.0, 60.0, 40.0),    # moving under load: neither regime
     row(3000, 90.0, 16.0, None),    # load missing: cannot judge coast
-]
+    row(2400, 50.0, 17.0, 2.0),     # EXACTLY at the boundary: strictly slower
+]                                   # than "> 50", so OUT. See below.
 coast = coast_samples(mixed)
 ok("coast selector takes unloaded-and-moving only", len(coast) == 2, f"got {len(coast)}")
+# The selector is `speed > 50`, and the printed line says so. A `>=` slip
+# reads identically on every fixture that has no row sitting ON the boundary,
+# and on Kris's real log it silently moves coast n 592 -> 610 and the residual
+# zeros 316 -> 334 — published numbers, changed by a character. This row is the
+# only thing in the suite that can tell the two apart.
+ok("coast selector is strictly ABOVE the speed floor, not at-or-above",
+   17.0 not in [t for t, _r in coast],
+   "a row at exactly COAST_MIN_SPEED was counted as coasting — the selector "
+   "is >= where the printout and the published sample counts say >")
 ok("coast selector does NOT read throttle — the 88.6%% row is in",
    88.6 in [t for t, _r in coast])
 ok("coast selector skips rows with no load_pct", 16.0 not in [t for t, _r in coast])
@@ -319,6 +329,79 @@ with tempfile.TemporaryDirectory() as d:
             ok("end-to-end: the two runs disagree at the throttle field",
                struct.unpack_from("<f", bare_pkts[-1], off)[0] !=
                struct.unpack_from("<f", wired_pkts[-1], off)[0])
+
+
+# --- the feed's OWN validation gate ------------------------------------------
+# The suite above proves the wiring works when the section is good. It says
+# nothing about a bad one, and a ship-qa pass proved the gap by reverting the
+# whole validation block to its pre-fix shape and watching every suite stay
+# green while a NaN calibration silently pinned the wire to 0.0. These drive
+# the feed's main() with a broken section and require a NAMED refusal — the
+# one outcome that must never happen is a clean start on a bad map.
+with tempfile.TemporaryDirectory() as d:
+    drive = os.path.join(d, "drive.csv")
+    with open(drive, "w") as f:
+        f.write("t_s,rpm,speed_kmh,throttle_pct\n")
+        for i in range(20):
+            f.write(f"{i * 0.1:.1f},2000,80,{COAST_THR}\n")
+    base = json.load(open(REAL_CAL))
+    base.pop("throttle", None)
+
+    BAD = [
+        ("inverted", {"floor_pct": 85.0, "ceiling_pct": 16.5}),
+        ("equal span", {"floor_pct": 50.0, "ceiling_pct": 50.0}),
+        ("NaN floor", {"floor_pct": float("nan"), "ceiling_pct": 85.0}),
+        ("out of range", {"floor_pct": 16.5, "ceiling_pct": 140.0}),
+        ("negative", {"floor_pct": -5.0, "ceiling_pct": 85.0}),
+        ("string value", {"floor_pct": "16.5", "ceiling_pct": 85.0}),
+        ("bool value", {"floor_pct": True, "ceiling_pct": 85.0}),
+        ("list value", {"floor_pct": [16.5], "ceiling_pct": 85.0}),
+        # The two below are the ones the old block let through: nothing ever
+        # asks for a misspelled key, so value validation cannot see it, and
+        # `or {}` read a falsy section as an absent one. Both silently
+        # restored the identity map — the inert-config defect wearing a hat.
+        ("misspelled key", {"floor_pct": 16.5, "celing_pct": 40.0}),
+        ("no _pct suffix", {"floor": 16.5, "ceiling": 85.0}),
+    ]
+    for label, section in BAD:
+        p = os.path.join(d, f"bad-{label.replace(' ', '-')}.json")
+        base["throttle"] = section
+        with open(p, "w") as fh:
+            json.dump(base, fh)
+        pkts, proc = replay_wire(p, drive)
+        ok(f"feed refuses a bad throttle section: {label}",
+           proc.returncode != 0 and not pkts,
+           f"rc={proc.returncode} pkts={len(pkts)} — the feed STARTED on a "
+           f"{label} section. {proc.stdout[-200:]}")
+        ok(f"...and the refusal names the file: {label}",
+           os.path.basename(p) in proc.stdout or "throttle" in proc.stdout,
+           f"unnamed refusal: {proc.stdout[-200:]}")
+
+    for label, section in [("falsy 0", 0), ("falsy empty string", ""),
+                           ("falsy list", []), ("non-dict int", 7)]:
+        p = os.path.join(d, f"shape-{label.replace(' ', '-')}.json")
+        base["throttle"] = section
+        with open(p, "w") as fh:
+            json.dump(base, fh)
+        pkts, proc = replay_wire(p, drive)
+        ok(f"feed refuses a throttle section that is not an object: {label}",
+           proc.returncode != 0 and not pkts,
+           f"rc={proc.returncode} pkts={len(pkts)} — a {label} section became "
+           f"the identity map silently. {proc.stdout[-200:]}")
+
+    # The provenance keys the learner writes must NOT trip the unknown-key
+    # refusal — otherwise every file the tool itself produces fails to load.
+    base["throttle"] = {"floor_pct": 16.5, "ceiling_pct": 85.0,
+                        "measured_wall_pct": 88.6, "learned_from": "x.csv",
+                        "learned_on": "2026-08-06", "_notes": "hi"}
+    p = os.path.join(d, "provenance.json")
+    with open(p, "w") as fh:
+        json.dump(base, fh)
+    pkts, proc = replay_wire(p, drive)
+    ok("feed accepts the full section the learner writes, provenance and all",
+       proc.returncode == 0 and pkts,
+       f"rc={proc.returncode} — the unknown-key check rejects this tool's own "
+       f"output. {proc.stdout[-300:]}")
 
 
 # --- the write path, which is the only part of this tool that can lose work --

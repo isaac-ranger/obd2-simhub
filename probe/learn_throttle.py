@@ -104,6 +104,8 @@ IDLE_MIN_RPM = 400.0    # below this the engine is off or in Auto-Stop
 RPM_BIN = 1000.0        # width of the coast floor's per-rpm bins, in rpm
 SPREAD_WARN_PCT = 5.0   # coast floor varying more than this across rpm = say so
 FLAT_WARN_PCT = 5.0     # this much of a log pinned at 100% = the wall is a cruise
+LOW_WALL_PCT = 70.0     # a pedal's mechanical stop sits near the top of its range
+MIN_SUSTAINED = 30      # samples on the wall below this = a brief hold, not a stop
 
 
 def load_samples(path):
@@ -120,7 +122,18 @@ def load_samples(path):
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:
-        for row in csv.DictReader(f):
+        # The decode happens lazily, row by row, so a non-UTF-8 file gets past
+        # open() and dies mid-iteration. Excel's "Unicode Text" save writes
+        # UTF-16 and this tool's audience is Windows-first, so that is a real
+        # path to a traceback rather than an exotic one. Refuse by name.
+        try:
+            rows = list(csv.DictReader(f))
+        except UnicodeDecodeError:
+            sys.exit(f"{path} is not a text CSV this tool can read — it "
+                     f"looks like UTF-16 or binary. If it came out of Excel, "
+                     f"re-save it as \"CSV UTF-8\"; obd_probe.py --log writes "
+                     f"that format directly.")
+        for row in rows:
             try:
                 rpm = float(row["rpm"])
                 speed = float(row["speed_kmh"])
@@ -238,6 +251,14 @@ def write_calibration(path, floor, ceiling, source, wall):
         sys.exit(f"{path} is read-only; not replacing it. The recommendation "
                  f"above is still good — make the file writable, or put the "
                  f"throttle section in by hand.")
+    if not isinstance(cal, dict):
+        # Valid JSON, wrong shape — a bare list or string parses fine and then
+        # has no place to put a section. Refuse by name like every other bad
+        # input here, rather than an AttributeError one line down.
+        sys.exit(f"{path} holds a JSON {type(cal).__name__}, not an object; "
+                 f"a calibration file is a {{...}} of sections. The "
+                 f"recommendation above is still good — put the throttle "
+                 f"section in by hand.")
     section = cal.setdefault("throttle", {})
     section["floor_pct"] = floor
     section["ceiling_pct"] = ceiling
@@ -357,6 +378,27 @@ def main():
                 f"Log one honest wide-open pull. If you already know this "
                 f"car's wall, write the throttle section into "
                 f"calibration.json by hand instead of learning it.")
+        # The check above catches a wall that is really a CRUISE, because a
+        # cruise is long and shows up as a big flat fraction. It is structurally
+        # blind to the opposite shape: a BRIEF hard push — a one-second overtake
+        # — in a long gentle drive. Ten samples out of seven thousand is 0.14%
+        # flat, under the threshold above and under even a real pull's ~1%, so
+        # that log yields a confidently wrong ceiling at exit 0. Two tells that
+        # do not depend on log length: a plate's mechanical stop sits near the
+        # top of the pedal's range, and it is HELD, not touched.
+        elif wall < LOW_WALL_PCT or wall_n < MIN_SUSTAINED:
+            problems.append(
+                f"the wall this log offers is {wall:.1f}% with only {wall_n} "
+                f"sample{'' if wall_n == 1 else 's'} sitting on it"
+                + (f" — a pedal's mechanical stop reads near the top of its "
+                   f"range, not {wall:.1f}%." if wall < LOW_WALL_PCT else
+                   f" — that is a brief hold, not a stop the pedal was resting "
+                   f"against.")
+                + f" This looks like the hardest you happened to push, not the "
+                  f"pedal running out of travel, and a ceiling of "
+                  f"{ceiling:.1f}% would make ordinary driving read 100%. Log "
+                  f"one honest wide-open pull, or write the throttle section "
+                  f"in by hand if you already know this car's wall.")
         if max(throttles) > wall:
             print(f"  NOTE: {sum(1 for t in throttles if t > wall)} sample(s) "
                   f"read above the wall, up to {max(throttles):.1f}% — too few "

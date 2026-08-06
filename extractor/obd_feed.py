@@ -46,7 +46,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir))
 from obd_probe import (Elm, ElmError, parse_mode01, adapter_init,
                        get_supported_pids, DASH_PIDS)
-from obd_config import parse_with_config
+from obd_config import parse_with_config, _did_you_mean
+
+# Every key the throttle section is allowed to carry. The first two are read;
+# the rest are provenance the learner writes so a future reader can tell which
+# drive produced these numbers. Anything else is a typo — see main().
+THROTTLE_KEYS = {"floor_pct", "ceiling_pct", "measured_wall_pct",
+                 "learned_from", "learned_on", "_notes"}
 
 # The three channels a sim overlay lives or dies by. Pinned into every
 # request; everything else rotates through the remaining slots.
@@ -993,11 +999,27 @@ def main():
     # traffic, not an exotic case. NaN is the one that has to be caught by
     # name — Python's json accepts it, every comparison against it is False,
     # so it slips the span check below and pins the wire to 0.0 in silence.
-    throttle = calibration.get("throttle") or {}
+    throttle = calibration.get("throttle")
+    if throttle is None:
+        throttle = {}
     if not isinstance(throttle, dict):
+        # Deliberately not `or {}`: that treats 0, false, "" and [] as absent
+        # and hands back the identity map, which is the one outcome a broken
+        # section must never produce silently.
         sys.exit(f"{args.calibration}: throttle must be an object with "
                  f"floor_pct and ceiling_pct, got "
                  f"{type(throttle).__name__}.")
+    # A misspelled key is the same failure as an inert config block, wearing a
+    # different hat: json.get() falls back to the default, the feed starts, and
+    # the map silently reverts to raw pass-through. Value validation below
+    # cannot see it — nothing ever asked for "celing_pct". So refuse unknown
+    # keys by name. This is the one a hand-editing stranger actually hits.
+    unknown = set(throttle) - THROTTLE_KEYS
+    if unknown:
+        key = sorted(unknown)[0]
+        sys.exit(f"{args.calibration}: throttle.{key} is not a setting this "
+                 f"feed reads." + _did_you_mean(key, sorted(THROTTLE_KEYS))
+                 + f" Known throttle keys: {', '.join(sorted(THROTTLE_KEYS))}.")
 
     def _throttle_pct(key, default):
         raw = throttle.get(key, default)
@@ -1075,6 +1097,12 @@ def main():
     print(f"Dash gear -> {args.dash_gear}"
           + ("  (holds last gear while rolling; log stays honest)"
              if args.dash_gear == "hold" else ""))
+    print(f"Throttle  -> " + (
+        f"{thr_floor:g}..{thr_ceiling:g}% pedal maps to 0..100% on the dash"
+        if (thr_floor, thr_ceiling) != (0.0, 100.0) else
+        "raw pass-through (no throttle section in "
+        f"{os.path.basename(args.calibration)}; "
+        "run probe/learn_throttle.py on a drive log)"))
     print(f"Contract  -> SimHub definition {layout.get('unique_id')} "
           f"(layout v{layout['header'][2].get('value', '?')}."
           f"{layout['header'][3].get('value', '?')})")
