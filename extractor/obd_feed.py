@@ -988,9 +988,35 @@ def main():
     engine = calibration.get("engine", {})
     # Absent a throttle section, 0..100 is the identity map: the feed sends
     # the raw pedal percentage exactly as it did before calibration existed.
-    throttle = calibration.get("throttle", {})
-    thr_floor = float(throttle.get("floor_pct", 0.0))
-    thr_ceiling = float(throttle.get("ceiling_pct", 100.0))
+    # Everything below is a named refusal rather than a bare float(): the
+    # section's own _notes invites hand-editing, so a typo here is expected
+    # traffic, not an exotic case. NaN is the one that has to be caught by
+    # name — Python's json accepts it, every comparison against it is False,
+    # so it slips the span check below and pins the wire to 0.0 in silence.
+    throttle = calibration.get("throttle") or {}
+    if not isinstance(throttle, dict):
+        sys.exit(f"{args.calibration}: throttle must be an object with "
+                 f"floor_pct and ceiling_pct, got "
+                 f"{type(throttle).__name__}.")
+
+    def _throttle_pct(key, default):
+        raw = throttle.get(key, default)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            sys.exit(f"{args.calibration}: throttle.{key} must be a number, "
+                     f"got {raw!r}. Run probe/learn_throttle.py on a drive "
+                     f"log to measure it.")
+        val = float(raw)
+        if not math.isfinite(val):
+            sys.exit(f"{args.calibration}: throttle.{key} is {val}, which is "
+                     f"not a real percentage. Run probe/learn_throttle.py on "
+                     f"a drive log to measure it.")
+        if not 0.0 <= val <= 100.0:
+            sys.exit(f"{args.calibration}: throttle.{key} is {val}, outside "
+                     f"the 0..100 a throttle percentage lives in.")
+        return val
+
+    thr_floor = _throttle_pct("floor_pct", 0.0)
+    thr_ceiling = _throttle_pct("ceiling_pct", 100.0)
     if thr_ceiling <= thr_floor:
         sys.exit(f"{args.calibration}: throttle.ceiling_pct "
                  f"({thr_ceiling}) must be above throttle.floor_pct "

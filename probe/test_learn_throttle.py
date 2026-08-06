@@ -177,6 +177,243 @@ for label, bad_cal in (("inverted", {"throttle_floor_pct": 85.0,
     except (SystemExit, LayoutError):
         ok(f"a {label} map refuses at construction", True)
 
+# --- the learner's own main(), driven as a user drives it -----------------
+# Nothing above this line enters learn_throttle.main(), and that is where the
+# crash lived: residual() was called before the `if coast:` guard, so ANY log
+# without coast samples died with a statistics.StatisticsError traceback —
+# including every log obd_probe.py --log can produce (its LOG_PIDS carry no
+# load_pct, so the coast selector can never fire) and the tool's own
+# recommended remedy, --floor-regime idle. A green unit suite said nothing
+# about it. These run the CLI the way Kris will.
+import subprocess
+
+LEARN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "learn_throttle.py")
+
+
+def learn_cli(rows, *flags):
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "log.csv")
+        with open(p, "w") as f:
+            f.write("t_s,rpm,speed_kmh,throttle_pct\n")
+            f.writelines(rows)
+        r = subprocess.run([sys.executable, LEARN, p, *flags],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=60)
+        return r.returncode, r.stdout
+
+
+# A probe-shaped log: idle and a pull, no load_pct column anywhere, so there
+# is a floor and a ceiling but zero coast samples. This is THE crash case.
+PROBE_LOG = ([f"{i},800,0,12.5\n" for i in range(400)]
+             + [f"{400 + i},6000,120,88.6\n" for i in range(6)])
+
+for label, flags in (("default", ()), ("--floor-regime idle",
+                                       ("--floor-regime", "idle"))):
+    rc, out = learn_cli(PROBE_LOG, *flags)
+    ok(f"main(): a coast-less log does not traceback ({label})",
+       "Traceback" not in out and "StatisticsError" not in out,
+       out[-300:])
+    ok(f"main(): a coast-less log still reports its idle floor ({label})",
+       "idle floor" in out, out[-200:])
+
+rc, out = learn_cli(PROBE_LOG + [f"{500 + i},6000,120,88.6\n" for i in range(400)])
+ok("main(): a log that is mostly wide-open refuses rather than "
+   "calling a cruise the wall", rc == 1 and "flat 100%" in out, out[-300:])
+
+# The verdict boundary, which no unit test reaches because it lives in main().
+rc, out = learn_cli([f"{i},800,0,50.0\n" for i in range(400)])
+ok("main(): a log with no span at all refuses", rc == 1, out[-300:])
+ok("main(): the refusal names what is missing, not a stack",
+   "Traceback" not in out and "FAIL" in out, out[-300:])
+
+
+# --- the wiring is real: main() must hand the map to the Packer -----------
+# Everything above this line passes with the two lines that install the
+# throttle constants into the Packer DELETED from obd_feed's main() — that
+# mutation was run and all seven suites stayed green while the live feed
+# silently reverted to raw/100. It is the ORIGINAL ship-blocker (an inert
+# config block), and no unit test can see it, because every unit test builds
+# its own Packer and hands it the cal dict by hand. Only an end-to-end run
+# through main() can tell "the feed CAN apply a map" from "the feed DOES".
+#
+# So: replay identical rows twice, once with a throttle section and once
+# without, and read the wire. The offset is discovered from the identity
+# run's own bytes rather than hard-coded, so this cannot rot when the packet
+# layout changes — it fails loudly instead.
+import socket
+import struct
+import subprocess
+
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+FEED = os.path.join(REPO, "extractor", "obd_feed.py")
+REAL_CAL = os.path.join(REPO, "calibration.json")
+COAST_THR = 16.5  # the floor: identity sends 0.165, a wired feed sends 0.0
+
+
+def replay_wire(cal_path, drive):
+    """Run the real feed over a recorded drive and return one UDP packet."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    proc = subprocess.run(
+        [sys.executable, FEED, "--replay", drive, "--calibration", cal_path,
+         "--udp", f"127.0.0.1:{port}", "--speed", "50", "--run-log", "off"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        timeout=60)
+    sock.settimeout(0.5)
+    packets = []
+    while True:
+        try:
+            packets.append(sock.recv(65535))
+        except socket.timeout:
+            break
+    sock.close()
+    return packets, proc
+
+
+with tempfile.TemporaryDirectory() as d:
+    drive = os.path.join(d, "drive.csv")
+    with open(drive, "w") as f:
+        f.write("t_s,rpm,speed_kmh,throttle_pct\n")
+        for i in range(40):
+            f.write(f"{i * 0.1:.1f},2000,80,{COAST_THR}\n")
+
+    base = json.load(open(REAL_CAL))
+    wired_path = os.path.join(d, "wired.json")
+    bare_path = os.path.join(d, "bare.json")
+    base["throttle"] = {"floor_pct": COAST_THR, "ceiling_pct": 85.0}
+    json.dump(base, open(wired_path, "w"))
+    base.pop("throttle")
+    json.dump(base, open(bare_path, "w"))
+
+    bare_pkts, bare_proc = replay_wire(bare_path, drive)
+    wired_pkts, wired_proc = replay_wire(wired_path, drive)
+
+    ok("end-to-end: the feed replays and sends without a throttle section",
+       bare_pkts and bare_proc.returncode == 0,
+       f"rc={bare_proc.returncode} pkts={len(bare_pkts)} {bare_proc.stdout[-300:]}")
+    ok("end-to-end: the feed replays and sends with one",
+       wired_pkts and wired_proc.returncode == 0,
+       f"rc={wired_proc.returncode} pkts={len(wired_pkts)} {wired_proc.stdout[-300:]}")
+
+    if bare_pkts and wired_pkts:
+        # Locate the throttle field by what the identity map must put there.
+        raw01 = struct.pack("<f", COAST_THR / 100.0)
+        off = bare_pkts[-1].find(raw01)
+        ok("end-to-end: the identity run puts raw/100 on the wire", off >= 0,
+           "0.165 is nowhere in the packet — layout has no derived:throttle_01 "
+           "field, so this test can no longer see the wiring")
+        if off >= 0:
+            got = struct.unpack_from("<f", wired_pkts[-1], off)[0]
+            # THE FALSIFIER. Delete obd_feed's two Packer cal lines and this
+            # is the assertion that fires: got would still be 0.165.
+            ok("end-to-end: main() WIRES the calibration — a floor sample "
+               "reads 0.0 on the wire, not raw/100",
+               got == 0.0, f"got {got!r} at offset {off} (0.165 means the "
+                           f"throttle section was read and then not used)")
+            # Deliberately NOT `bare_pkt != wired_pkt`: packets carry clocks
+            # and counters, so whole-packet inequality is true no matter what
+            # the throttle field says. Verified — that weaker form passes
+            # with the wiring deleted. Compare the field, not the frame.
+            ok("end-to-end: the two runs disagree at the throttle field",
+               struct.unpack_from("<f", bare_pkts[-1], off)[0] !=
+               struct.unpack_from("<f", wired_pkts[-1], off)[0])
+
+
+# --- the write path, which is the only part of this tool that can lose work --
+# calibration.json also carries the learned gear ratios — their own drive to
+# measure. Every failure here used to be a traceback, and the write itself
+# truncated in place, so an interrupt could take the gears with it.
+GOOD_LOG = ([f"{i},2500,90,16.5,3.0\n" for i in range(3000)]        # coast
+            + [f"{3000 + i},800,0,12.5,20.0\n" for i in range(6000)]  # idle
+            + [f"{9000 + i},6500,150,88.6,90.0\n" for i in range(160)])  # pull
+
+
+def learn_write(target, rows=GOOD_LOG):
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "log.csv")
+        with open(p, "w") as f:
+            f.write("t_s,rpm,speed_kmh,throttle_pct,load_pct\n")
+            f.writelines(rows)
+        r = subprocess.run([sys.executable, LEARN, p, "--write", target],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=60)
+        return r.returncode, r.stdout
+
+
+with tempfile.TemporaryDirectory() as d:
+    rc, out = learn_write(os.path.join(d, "cal.json"))
+    ok("--write: the reference log writes cleanly", rc == 0, out[-300:])
+
+    for label, target in (("a path whose directory does not exist",
+                           os.path.join(d, "nope", "cal.json")),
+                          ("a directory", d)):
+        rc, out = learn_write(target)
+        ok(f"--write refuses {label} by name, not by traceback",
+           rc == 1 and "Traceback" not in out
+           and ("cannot write" in out or "cannot read" in out), out[-300:])
+
+    # os.replace renames over its target, and the filesystem allows that on a
+    # read-only FILE — the permission that governs it lives on the directory.
+    # Honouring the bits and not the intent would be a silent regression that
+    # only the atomic write introduced.
+    ro = os.path.join(d, "ro.json")
+    with open(ro, "w") as f:
+        f.write('{"engine": {"redline_rpm": 7000}}\n')
+    before = open(ro).read()
+    os.chmod(ro, 0o444)
+    rc, out = learn_write(ro)
+    ok("--write refuses a read-only calibration instead of replacing it",
+       rc == 1 and "read-only" in out and "Traceback" not in out, out[-300:])
+    os.chmod(ro, 0o644)
+    ok("--write left the read-only file byte-for-byte intact",
+       open(ro).read() == before)
+
+    # Atomicity's visible half: no debris, and every other section survives.
+    real = os.path.join(d, "real.json")
+    with open(REAL_CAL) as f:
+        original = json.load(f)
+    with open(real, "w") as f:
+        json.dump(original, f)
+    rc, out = learn_write(real)
+    with open(real) as f:
+        written = json.load(f)
+    ok("--write preserves every section it did not learn", rc == 0
+       and {k: v for k, v in written.items() if k != "throttle"}
+       == {k: v for k, v in original.items() if k != "throttle"}, out[-200:])
+    ok("--write leaves no .tmp debris behind",
+       not [p for p in os.listdir(d) if p.endswith(".tmp")],
+       str(os.listdir(d)))
+
+    # Atomicity's other half, and the one no black-box assertion can reach:
+    # a write that truncates in place and one that renames a finished file
+    # over the target are indistinguishable by their RESULT. They differ in
+    # what a half-finished run leaves behind, and nothing here can interrupt
+    # one. So test the mechanism instead of the outcome — a truncating write
+    # keeps the target's inode, a rename replaces it. Reverting os.replace
+    # passes every other test in this block; it fails this one.
+    ino_before = os.stat(real).st_ino
+    rc, out = learn_write(real)
+    ok("--write replaces the file rather than truncating it in place",
+       rc == 0 and (ino_before == 0 or os.stat(real).st_ino != ino_before),
+       f"inode unchanged ({ino_before}) — the learned gear ratios in this "
+       f"file are only as safe as the write is atomic")
+
+# --- corrupt numbers must not become the wall -------------------------------
+# float() accepts "1e400" (inf) and "nan". inf sorts above every real reading,
+# so a handful of corrupt rows would be elected the wall and then fail to
+# convert to a byte — OverflowError, mid-run, on somebody else's log file.
+INF_LOG = ([f"{i},2500,90,16.5,3.0\n" for i in range(3000)]
+           + [f"{3000 + i},800,0,12.5,20.0\n" for i in range(6000)]
+           + [f"{9000 + i},6500,150,88.6,90.0\n" for i in range(160)]
+           + [f"{9200 + i},6500,150,1e400,90.0\n" for i in range(10)])
+rc, out = learn_cli(INF_LOG)
+ok("a log with non-finite throttle values does not traceback",
+   "Traceback" not in out and "OverflowError" not in out, out[-300:])
+ok("...and the corrupt rows do not become the wall",
+   "88.6" in out and "inf" not in out.lower(), out[-300:])
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {FAILED}")

@@ -4,3 +4,12 @@ __pycache__/
 runs/
 status/obd2_status.json
 config.json
+# Drive logs are somebody's car, somebody's route and somebody's timestamps.
+# They are what the calibration was learned FROM, not part of what ships —
+# and this repo has a public remote. Keep them out by default; a log only
+# goes in if its owner says so, by name.
+logs/
+# Working analysis and pre-ship QA reports: internal, and they go stale the
+# moment the code moves.
+CALIBRATION-FINDINGS.md
+SHIP-QA-*.md

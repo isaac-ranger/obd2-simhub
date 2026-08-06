@@ -72,7 +72,7 @@ THE ONE THING THIS MODEL CANNOT REPRESENT
 
 There is no single closed-throttle zero. Within the coast regime the plate
 opens further as engine speed rises — on the reference car the median coast
-reading climbs from ~14% near 1,000 rpm to ~23% near 8,000. A two-point map
+reading climbs from ~16% near 1,500 rpm to ~23% near 7,000. A two-point map
 has one floor, so it fixes whichever part of that range the median lands in
 and leaves a small residual at the ends. That is a real limit of the shape
 Kris asked for, not a bug in the fit, and the per-rpm table printed below
@@ -103,6 +103,7 @@ COAST_MIN_SPEED = 50.0  # km/h; slower than this and "coasting" blurs into town
 IDLE_MIN_RPM = 400.0    # below this the engine is off or in Auto-Stop
 RPM_BIN = 1000.0        # width of the coast floor's per-rpm bins, in rpm
 SPREAD_WARN_PCT = 5.0   # coast floor varying more than this across rpm = say so
+FLAT_WARN_PCT = 5.0     # this much of a log pinned at 100% = the wall is a cruise
 
 
 def load_samples(path):
@@ -126,10 +127,18 @@ def load_samples(path):
                 thr = float(row["throttle_pct"])
             except (KeyError, TypeError, ValueError):
                 continue  # header variants, blank lines and gaps are not data
+            if not (math.isfinite(rpm) and math.isfinite(speed)
+                    and math.isfinite(thr)):
+                continue  # float() accepts "nan" and "1e400"; a corrupt or
+                # hand-made row must not become the wall — inf sorts above
+                # every real reading and then cannot be turned into a byte.
             try:
                 load = float(row["load_pct"])
             except (KeyError, TypeError, ValueError):
                 load = None
+            else:
+                if not math.isfinite(load):
+                    load = None
             out.append((rpm, speed, thr, load))
     return out
 
@@ -203,20 +212,57 @@ def write_calibration(path, floor, ceiling, source, wall):
         with open(path) as f:
             cal = json.load(f)
     except FileNotFoundError:
-        cal = {}
+        cal = {}  # a fresh install has no calibration yet; make it one
+    except OSError as e:
+        # A directory, a permission wall, a bad path. Name it — the read side
+        # of this tool already does, and this is the side that can lose work.
+        sys.exit(f"cannot read {path}: {e}")
     except json.JSONDecodeError as e:
         sys.exit(f"{path} is not valid JSON ({e}); not touching it")
     if os.path.isabs(source):
-        source = os.path.relpath(source)  # provenance, not a machine path
+        try:
+            rel = os.path.relpath(source)  # provenance, not a machine path
+        except ValueError:
+            rel = source  # Windows: log on E:, repo on C:. There is no
+            # relative path between two drives, and this string is only ever
+            # read by a human — the absolute one says the same thing.
+        # ...and a relpath that climbs out of the repo says it worse than the
+        # absolute one did. Shorter is only better while it stays inside.
+        source = source if rel.startswith(os.pardir) else rel
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        # The atomic write below renames a new file over this one, which the
+        # filesystem will happily allow on a read-only target — the mode is on
+        # the file, the permission that matters is on the directory. Somebody
+        # who marked this file read-only meant it, so refuse here instead of
+        # quietly honouring the letter of the permission bits and not the point.
+        sys.exit(f"{path} is read-only; not replacing it. The recommendation "
+                 f"above is still good — make the file writable, or put the "
+                 f"throttle section in by hand.")
     section = cal.setdefault("throttle", {})
     section["floor_pct"] = floor
     section["ceiling_pct"] = ceiling
     section["measured_wall_pct"] = wall
     section["learned_from"] = source
     section["learned_on"] = time.strftime("%Y-%m-%d")
-    with open(path, "w") as f:
-        json.dump(cal, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Write beside the target and rename over it. calibration.json also holds
+    # the learned gear ratios, which took their own drive to measure: a
+    # truncating write that is interrupted — Ctrl-C, a full disk, a dying
+    # laptop — would take those with it. os.replace is atomic on both
+    # platforms, so the file is either the old one or the new one.
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(cal, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        sys.exit(f"cannot write {path}: {e}. Nothing was changed — the "
+                 f"recommendation above is still good, and you can put the "
+                 f"throttle section in by hand.")
 
 
 def build_parser():
@@ -255,8 +301,11 @@ def main():
     samples = load_samples(args.log)
     if not samples:
         sys.exit(f"no usable rows in {args.log} — expected columns "
-                 f"rpm,speed_kmh,throttle_pct (the header obd_probe.py "
-                 f"--log writes; load_pct too, for the coast floor)")
+                 f"rpm,speed_kmh,throttle_pct (exactly what obd_probe.py "
+                 f"--log writes). A load_pct column is optional and only "
+                 f"the feed's own logs carry it; without one the coast "
+                 f"floor cannot be measured and you want --floor-regime "
+                 f"idle.")
 
     throttles = [t for _r, _v, t, _ld in samples]
     coast = coast_samples(samples)
@@ -290,9 +339,24 @@ def main():
               f"({wall_n} samples sit exactly on it, {at_wall} at or above)")
         print(f"  ceiling             {ceiling:.1f} %  "
               f"(wall less {args.ceiling_margin_pct:.1f}%, rounded down)")
+        flat_pct = over / len(throttles) * 100.0
         print(f"                      {over} samples "
-              f"({over / len(throttles) * 100.0:.2f}% of the log) would read "
-              f"a flat 100%")
+              f"({flat_pct:.2f}% of the log) would read a flat 100%")
+        # find_wall takes the highest value that REPEATS, and a steady cruise
+        # repeats as willingly as a plate stop — so a log with no wide-open
+        # pull still yields a wall, silently, and it is just the hardest the
+        # driver happened to push. The tell is this fraction: a real pull
+        # spends ~1% of the log pinned, a cruise mistaken for a wall spends
+        # tens of percent. Warn on it rather than trust the number.
+        if flat_pct > FLAT_WARN_PCT:
+            problems.append(
+                f"{flat_pct:.1f}% of this log would read a flat 100% under a "
+                f"ceiling of {ceiling:.1f}. That is far too much of a drive to "
+                f"be spent at wide-open throttle, so {wall:.1f}% is very "
+                f"likely the hardest you pushed rather than the plate's stop. "
+                f"Log one honest wide-open pull. If you already know this "
+                f"car's wall, write the throttle section into "
+                f"calibration.json by hand instead of learning it.")
         if max(throttles) > wall:
             print(f"  NOTE: {sum(1 for t in throttles if t > wall)} sample(s) "
                   f"read above the wall, up to {max(throttles):.1f}% — too few "
@@ -361,12 +425,15 @@ def main():
                   f"nothing here can remove it.")
 
     # --- what the recommendation actually does to your coasting ------------
-    if floor is not None and ceiling is not None and ceiling > floor:
+    # `coast` gates the call, not just the print: residual() takes a median of
+    # the mapped samples, and a log with no coast in it (every obd_probe --log
+    # capture, every city drive, every --floor-regime idle run) would hand
+    # statistics.median an empty list and die here with a traceback.
+    if floor is not None and ceiling is not None and ceiling > floor and coast:
         med, p90, zeros = residual(coast, floor, ceiling)
-        if coast:
-            print(f"\n  under this map your coast samples read: median "
-                  f"{med:.1f}%, p90 {p90:.1f}%, {zeros} of {len(coast)} "
-                  f"({zeros / len(coast) * 100.0:.0f}%) exactly zero")
+        print(f"\n  under this map your coast samples read: median "
+              f"{med:.1f}%, p90 {p90:.1f}%, {zeros} of {len(coast)} "
+              f"({zeros / len(coast) * 100.0:.0f}%) exactly zero")
 
     # --- verdict -----------------------------------------------------------
     if floor is not None and ceiling is not None and ceiling <= floor:
