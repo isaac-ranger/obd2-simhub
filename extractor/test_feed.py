@@ -708,9 +708,13 @@ with tempfile.TemporaryDirectory() as td:
         p = os.path.join(td, "cal.json")
         with open(p, "w", encoding="utf-8") as f:
             json.dump(cal, f)
+        # --speed 1000: a refusal never reaches the replay, but a MUTANT that
+        # waves the bad file through would replay all 127 s of drive_01 at
+        # 1x and surface as TimeoutExpired mid-table instead of a FAIL line.
         proc = subprocess.run(
             [sys.executable, os.path.join(HERE, "obd_feed.py"),
-             "--replay", DRIVE, "--calibration", p],
+             "--replay", DRIVE, "--calibration", p,
+             "--speed", "1000", "--run-log", "off"],
             capture_output=True, text=True, timeout=60)
         ok(f"calibration {label}: named refusal, no traceback",
            proc.returncode != 0 and token in proc.stderr
@@ -758,6 +762,50 @@ with tempfile.TemporaryDirectory() as td:
        proc.returncode != 0 and "cannot read" in proc.stderr
        and "Traceback" not in proc.stderr,
        (proc.stderr or proc.stdout).strip()[:160])
+
+    # The UTF-16 refusal's remedy is Excel's "CSV UTF-8" — which writes a
+    # BOM. The remedy has to actually work, or the refusal is a loop:
+    # refused for UTF-16, re-saved as told, refused again for a column name
+    # nobody can see the BOM in. utf-8-sig makes the round trip real.
+    park = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    park.bind(("127.0.0.1", 0))
+    sink = f"127.0.0.1:{park.getsockname()[1]}"
+    bom = os.path.join(td, "resaved.csv")
+    with open(bom, "w", encoding="utf-8-sig", newline="") as f:
+        f.write("t_s,rpm,speed_kmh\n0.0,2000,50\n0.2,2010,50\n")
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "obd_feed.py"),
+         "--replay", bom, "--calibration", cal, "--udp", sink,
+         "--speed", "1000", "--run-log", "off"],
+        capture_output=True, text=True, timeout=60)
+    ok("replay: a BOM'd \"CSV UTF-8\" file loads — the remedy round-trips",
+       proc.returncode == 0 and "Replaying 2 samples" in proc.stdout
+       and "Traceback" not in proc.stderr,
+       (proc.stderr or proc.stdout).strip()[:160])
+
+    # A tail log the previous run killed mid-write ends in a truncated row —
+    # and feed-last.csv is this README's own replay suggestion. DictReader
+    # hands the missing cells over as None; the row must be skipped, not
+    # become a TypeError at startup. (Mutation-tested: without TypeError in
+    # the replay reader's except, this file kills the feed.)
+    cut = os.path.join(td, "cut-mid-write.csv")
+    with open(cut, "w", encoding="utf-8", newline="") as f:
+        f.write("t_s,rpm,speed_kmh\n0.0,2000,50\n0.1\n0.2,2010,50\n")
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "obd_feed.py"),
+         "--replay", cut, "--calibration", cal, "--udp", sink,
+         "--speed", "1000", "--run-log", "off"],
+        capture_output=True, text=True, timeout=60)
+    ok("replay: a truncated row is skipped, not a startup TypeError",
+       proc.returncode == 0 and "Replaying 2 samples" in proc.stdout
+       and "Traceback" not in proc.stderr,
+       (proc.stderr or proc.stdout).strip()[:160])
+    park.close()
+
+# "units": null is a hand-editor disabling the section; every other section
+# reads null as absent, and this one used to be the lone AttributeError.
+ok("units: a null section reads as absent (metric), not a traceback",
+   display_units({"units": None}) == "metric")
 
 # Refusals quote paths, and the README quotes refusals — so the default path
 # has to arrive without its extractor/../ scaffolding still attached.

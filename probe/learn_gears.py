@@ -64,8 +64,10 @@ def load_samples(path):
         # reason: under a Windows locale default (cp1252) an Excel "Unicode
         # Text" save decodes into NUL-garbage instead of raising, and the
         # named refusal below never gets its turn. The probe and feed write
-        # ascii/utf-8 only.
-        f = open(path, newline="", encoding="utf-8")
+        # ascii/utf-8 only. -sig, because the refusal's remedy is Excel's
+        # "CSV UTF-8" and Excel writes that WITH a BOM — plain utf-8 folds
+        # it into the first column name and t_s never matches again.
+        f = open(path, newline="", encoding="utf-8-sig")
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:

@@ -530,7 +530,10 @@ class Sender(threading.Thread):
 # --------------------------------------------------------------------------
 
 def display_units(calibration, override=None):
-    mode = override or calibration.get("units", {}).get("display", "metric")
+    # `or {}`, not a .get default: "units": null is a hand-editor disabling
+    # the section, and null reads as absent everywhere else in this file.
+    mode = override or (calibration.get("units") or {}).get("display",
+                                                            "metric")
     if mode not in ("metric", "imperial"):
         sys.exit(f"units must be 'metric' or 'imperial', not {mode!r}")
     return mode
@@ -823,7 +826,7 @@ def poll_replay(args, state, run_log, sender):
     that is paced to the recording."""
     rows = []
     try:
-        f = open(args.replay, newline="", encoding="utf-8")
+        f = open(args.replay, newline="", encoding="utf-8-sig")
     except OSError as e:
         sys.exit(f"cannot read {args.replay}: {e}")
     with f:
@@ -832,6 +835,8 @@ def poll_replay(args, state, run_log, sender):
         # Windows (cp1252) accepts its ASCII-range bytes as NUL-riddled
         # garbage instead of raising. Pin utf-8 — everything this feed and
         # the probe write is ascii/utf-8 — so the refusal fires everywhere.
+        # -sig: the remedy it names is Excel's "CSV UTF-8", which carries a
+        # BOM that plain utf-8 would fold into the t_s column name.
         try:
             recorded = list(csv.DictReader(f))
         except UnicodeDecodeError:

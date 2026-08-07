@@ -132,8 +132,11 @@ def load_samples(path):
         # murmur, into NUL-riddled garbage whose column names match nothing:
         # the refusal below could only ever fire on machines that would never
         # produce the file. Everything the probe and feed write is
-        # ascii/utf-8, so the strict read costs nothing real.
-        f = open(path, newline="", encoding="utf-8")
+        # ascii/utf-8, so the strict read costs nothing real. -sig, because
+        # the refusal's remedy is Excel's "CSV UTF-8" and Excel writes that
+        # WITH a BOM — plain utf-8 would fold it into the first column name
+        # and refuse the very file it asked for.
+        f = open(path, newline="", encoding="utf-8-sig")
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:

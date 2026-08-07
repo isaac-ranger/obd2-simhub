@@ -257,6 +257,16 @@ with tempfile.TemporaryDirectory() as d:
        r.returncode == 1 and "CSV UTF-8" in r.stdout
        and "Traceback" not in r.stdout, r.stdout[-300:])
 
+    # ...and the remedy the refusal names has to WORK: Excel's "CSV UTF-8"
+    # writes a BOM, which plain utf-8 folds into the first column name.
+    # utf-8-sig strips it, so the re-saved file parses instead of looping.
+    p2 = os.path.join(d, "resaved-csv-utf8.csv")
+    with open(p2, "w", encoding="utf-8-sig", newline="") as f:
+        f.write("rpm,speed_kmh,throttle_pct,load_pct\n2000,60,16.5,2\n")
+    s = load_samples(p2)
+    ok("a BOM'd \"CSV UTF-8\" log loads — the remedy round-trips",
+       len(s) == 1 and s[0][2] == 16.5, f"{s}")
+
 
 # --- the wiring is real: main() must hand the map to the Packer -----------
 # Everything above this line passes with the two lines that install the

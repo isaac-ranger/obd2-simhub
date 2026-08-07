@@ -93,6 +93,18 @@ except SystemExit as e:
 finally:
     _os.unlink(tmp)
 
+# ...and the named remedy must round-trip: Excel's "CSV UTF-8" carries a BOM,
+# and utf-8-sig keeps it out of the t_s column name.
+with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
+                                 encoding="utf-8-sig") as f:
+    f.write("t_s,rpm,speed_kmh\n0.2,1000,20\n")
+    tmp = f.name
+try:
+    ok("BOM'd \"CSV UTF-8\" log loads — the remedy round-trips",
+       len(load_samples(tmp)) == 1)
+finally:
+    _os.unlink(tmp)
+
 # --- empty input is an empty answer, not a crash ---------------------------
 ok("empty log clusters to nothing", cluster([]) == [] and steady_ratios([]) == [])
 
