@@ -126,7 +126,14 @@ def load_samples(path):
     """
     out = []
     try:
-        f = open(path, newline="")
+        # encoding= is load-bearing, not hygiene. Without it the default is
+        # the locale codepage, and cp1252 — the codepage of the platform this
+        # tool was written for — decodes UTF-16's ASCII-range bytes without a
+        # murmur, into NUL-riddled garbage whose column names match nothing:
+        # the refusal below could only ever fire on machines that would never
+        # produce the file. Everything the probe and feed write is
+        # ascii/utf-8, so the strict read costs nothing real.
+        f = open(path, newline="", encoding="utf-8")
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:

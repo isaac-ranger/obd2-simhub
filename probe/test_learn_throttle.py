@@ -237,6 +237,26 @@ ok("main(): a log with no span at all refuses", rc == 1, out[-300:])
 ok("main(): the refusal names what is missing, not a stack",
    "Traceback" not in out and "FAIL" in out, out[-300:])
 
+# Excel's "Unicode Text" save is UTF-16, and the named refusal for it was
+# written for Windows — where the locale-default decode (cp1252) accepts
+# UTF-16's ASCII-range bytes as garbage instead of raising, so the refusal
+# could never actually fire there. load_samples now pins encoding="utf-8",
+# which makes this die by name on EVERY platform; this case holds that pin.
+# (Scope, honestly: this box's locale is UTF-8, so what the case proves is
+# the contract — BOM'd UTF-16 refuses by name — and the pin is what makes
+# the contract locale-independent. A cp1252 locale isn't installable here.)
+with tempfile.TemporaryDirectory() as d:
+    p = os.path.join(d, "excel-unicode-text.csv")
+    with open(p, "wb") as f:
+        f.write("t_s,rpm,speed_kmh,throttle_pct\n1,2000,50,20\n"
+                .encode("utf-16"))
+    r = subprocess.run([sys.executable, LEARN, p],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=60)
+    ok("a UTF-16 log refuses by name (re-save as CSV UTF-8), not traceback",
+       r.returncode == 1 and "CSV UTF-8" in r.stdout
+       and "Traceback" not in r.stdout, r.stdout[-300:])
+
 
 # --- the wiring is real: main() must hand the map to the Packer -----------
 # Everything above this line passes with the two lines that install the

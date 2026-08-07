@@ -60,15 +60,27 @@ def load_samples(path):
     """Return [(t_s, rpm, speed_kmh)] from a --log CSV, tolerating extra columns."""
     out = []
     try:
-        f = open(path, newline="")
+        # Strict utf-8, same as learn_throttle's reader and for the same
+        # reason: under a Windows locale default (cp1252) an Excel "Unicode
+        # Text" save decodes into NUL-garbage instead of raising, and the
+        # named refusal below never gets its turn. The probe and feed write
+        # ascii/utf-8 only.
+        f = open(path, newline="", encoding="utf-8")
     except OSError as e:
         sys.exit(f"cannot read {path}: {e}")
     with f:
-        for row in csv.DictReader(f):
+        try:
+            rows = list(csv.DictReader(f))
+        except UnicodeDecodeError:
+            sys.exit(f"{path} is not a text CSV this tool can read — it "
+                     f"looks like UTF-16 or binary. If it came out of Excel, "
+                     f"re-save it as \"CSV UTF-8\"; obd_probe.py --log "
+                     f"writes that format directly.")
+        for row in rows:
             try:
                 out.append((float(row["t_s"]), float(row["rpm"]), float(row["speed_kmh"])))
-            except (KeyError, ValueError):
-                continue  # header variants and blank lines are not data
+            except (KeyError, TypeError, ValueError):
+                continue  # header variants, blank lines and short rows are not data
     return out
 
 

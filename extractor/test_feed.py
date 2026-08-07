@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(HERE, os.pardir, "probe"))
 
 from obd_feed import (Scheduler, GearWatch, GearDisplay, CarState, Packer,
                       Sender, RunLog, decode_sample, display_units, fmt_speed,
-                      fmt_temp, MIN_RPM, MIN_SPEED)
+                      fmt_temp, repo_path, MIN_RPM, MIN_SPEED)
 import fake_car
 
 REPO = os.path.join(HERE, os.pardir)
@@ -645,6 +645,125 @@ with tempfile.TemporaryDirectory() as td:
        and "learn_gears" in proc.stderr
        and "Traceback" not in proc.stderr,
        proc.stderr.strip()[:120] or proc.stdout.strip()[:120])
+
+# ── wrong-typed calibration OUTSIDE the throttle section ──────────────────
+# The throttle section earned a full named-refusal vocabulary across the QA
+# passes; the rest of the file used to traceback — a top-level array died as
+# AttributeError in display_units, a lone float in rpm_per_kmh as TypeError
+# inside GearWatch, a string tolerance as ValueError mid-float(). The seed's
+# own _notes invite hand-editing every one of these sections, so a typo here
+# is expected traffic and gets the same treatment: refuse by name, through
+# the real main(), the way a hand-editor meets it.
+GOOD_GEARS = {"rpm_per_kmh": [103.0, 60.4, 43.3, 35.0, 29.2, 25.2],
+              "tolerance_pct": 7}
+BAD_CALS = [
+    ("top-level array", [1, 2], "not an object"),
+    ("top-level string", "calibrate me", "not an object"),
+    ("top-level number", 7, "not an object"),
+    ("gears as array", {"gears": [103.0]}, '"gears"'),
+    ("rpm_per_kmh as lone float", {"gears": {"rpm_per_kmh": 5.0}},
+     "rpm_per_kmh"),
+    ("rpm_per_kmh as string", {"gears": {"rpm_per_kmh": "abc"}},
+     "rpm_per_kmh"),
+    ("rpm_per_kmh with a string element",
+     {"gears": {"rpm_per_kmh": [103.0, "x"]}}, "rpm_per_kmh"),
+    ("rpm_per_kmh with a NaN element",
+     {"gears": {"rpm_per_kmh": [103.0, float("nan")]}}, "rpm_per_kmh"),
+    ("rpm_per_kmh with a zero element",
+     {"gears": {"rpm_per_kmh": [103.0, 0.0]}}, "rpm_per_kmh"),
+    ("tolerance_pct as string",
+     {"gears": {"rpm_per_kmh": [103.0], "tolerance_pct": "x"}},
+     "tolerance_pct"),
+    ("tolerance_pct as NaN",
+     {"gears": {"rpm_per_kmh": [103.0], "tolerance_pct": float("nan")}},
+     "tolerance_pct"),
+    ("tolerance_pct as zero",
+     {"gears": {"rpm_per_kmh": [103.0], "tolerance_pct": 0}},
+     "tolerance_pct"),
+    ("engine as array", {"gears": GOOD_GEARS, "engine": [8000]}, '"engine"'),
+    ("max_rpm as string",
+     {"gears": GOOD_GEARS, "engine": {"max_rpm": "high"}}, "max_rpm"),
+    ("tire_sets as array",
+     {"gears": GOOD_GEARS, "tire_sets": ["street_18"]}, '"tire_sets"'),
+    ("active_set as array",
+     {"gears": GOOD_GEARS, "tire_sets": {}, "active_set": ["street_18"]},
+     "active_set"),
+    ("active_set naming no set (typo -> silent factor 1.0)",
+     {"gears": GOOD_GEARS, "active_set": "stret_18",
+      "tire_sets": {"street_18": {"speed_factor": 1.0}}}, "street_18"),
+    ("tire set entry as array",
+     {"gears": GOOD_GEARS, "active_set": "s", "tire_sets": {"s": [1.0]}},
+     "not an object"),
+    ("speed_factor as string",
+     {"gears": GOOD_GEARS, "active_set": "s",
+      "tire_sets": {"s": {"speed_factor": "fast"}}}, "speed_factor"),
+    ("speed_factor as zero",
+     {"gears": GOOD_GEARS, "active_set": "s",
+      "tire_sets": {"s": {"speed_factor": 0}}}, "speed_factor"),
+    ("units as array", {"gears": GOOD_GEARS, "units": ["imperial"]},
+     '"units"'),
+]
+with tempfile.TemporaryDirectory() as td:
+    for label, cal, token in BAD_CALS:
+        p = os.path.join(td, "cal.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(cal, f)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "obd_feed.py"),
+             "--replay", DRIVE, "--calibration", p],
+            capture_output=True, text=True, timeout=60)
+        ok(f"calibration {label}: named refusal, no traceback",
+           proc.returncode != 0 and token in proc.stderr
+           and "Traceback" not in proc.stderr,
+           (proc.stderr or proc.stdout).strip()[:160])
+
+# The seed file must sail through every gate above — the checks exist to
+# catch typos, not to make the shipped repo refuse itself. (The bare-cal
+# test already proves the gears refusal; this proves nothing ELSE fires
+# first on the real file.)
+proc = subprocess.run(
+    [sys.executable, os.path.join(HERE, "obd_feed.py"),
+     "--replay", DRIVE],
+    capture_output=True, text=True, timeout=60)
+ok("shipped calibration.json: the only refusal is the gears one",
+   proc.returncode != 0 and "has no gears.rpm_per_kmh" in proc.stderr
+   and "Traceback" not in proc.stderr,
+   (proc.stderr or proc.stdout).strip()[:160])
+
+# ── the replay file surface ───────────────────────────────────────────────
+# Same class as the learners' log readers: strict utf-8 plus a named refusal,
+# so an Excel "Unicode Text" (UTF-16) save or a wrong path dies by name on
+# every platform instead of a UnicodeDecodeError traceback mid-iteration.
+with tempfile.TemporaryDirectory() as td:
+    cal = os.path.join(td, "cal.json")
+    with open(cal, "w", encoding="utf-8") as f:
+        json.dump({"gears": GOOD_GEARS}, f)
+    u16 = os.path.join(td, "drive.csv")
+    with open(u16, "wb") as f:
+        f.write("t_s,rpm,speed_kmh\n1.0,2000,50\n".encode("utf-16"))
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "obd_feed.py"),
+         "--replay", u16, "--calibration", cal, "--run-log", "off"],
+        capture_output=True, text=True, timeout=60)
+    ok("replay: a UTF-16 drive log refuses by name (re-save as CSV UTF-8)",
+       proc.returncode != 0 and "CSV UTF-8" in proc.stderr
+       and "Traceback" not in proc.stderr,
+       (proc.stderr or proc.stdout).strip()[:160])
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "obd_feed.py"),
+         "--replay", os.path.join(td, "no-such.csv"), "--calibration", cal,
+         "--run-log", "off"],
+        capture_output=True, text=True, timeout=60)
+    ok("replay: a missing drive log refuses by name",
+       proc.returncode != 0 and "cannot read" in proc.stderr
+       and "Traceback" not in proc.stderr,
+       (proc.stderr or proc.stdout).strip()[:160])
+
+# Refusals quote paths, and the README quotes refusals — so the default path
+# has to arrive without its extractor/../ scaffolding still attached.
+ok("repo_path hands out normalized paths",
+   os.pardir not in repo_path("calibration.json").split(os.sep),
+   repo_path("calibration.json"))
 
 # ---------------------------------------------------------------------------------
 

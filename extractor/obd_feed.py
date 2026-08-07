@@ -86,9 +86,12 @@ def load_json(path, what):
 
 
 def repo_path(*parts):
-    """Default config locations relative to this file, so cwd never matters."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        os.pardir, *parts)
+    """Default config locations relative to this file, so cwd never matters.
+    Normalized, because these paths end up in refusal messages and the README
+    quotes them without the extractor/../ scaffolding."""
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     os.pardir, *parts))
 
 
 # --------------------------------------------------------------------------
@@ -819,16 +822,32 @@ def poll_replay(args, state, run_log, sender):
     state updates, same sender — the only fiction is the clock, and even
     that is paced to the recording."""
     rows = []
-    with open(args.replay, newline="") as f:
-        for row in csv.DictReader(f):
-            try:
-                rows.append((float(row["t_s"]),
-                             {0x0C: float(row["rpm"]),
-                              0x0D: float(row["speed_kmh"]),
-                              **({0x11: float(row["throttle_pct"])}
-                                 if row.get("throttle_pct") else {})}))
-            except (KeyError, ValueError):
-                continue
+    try:
+        f = open(args.replay, newline="", encoding="utf-8")
+    except OSError as e:
+        sys.exit(f"cannot read {args.replay}: {e}")
+    with f:
+        # Same guard as the learners' log readers, same reason: Excel's
+        # "Unicode Text" save is UTF-16, and the locale-default decode on
+        # Windows (cp1252) accepts its ASCII-range bytes as NUL-riddled
+        # garbage instead of raising. Pin utf-8 — everything this feed and
+        # the probe write is ascii/utf-8 — so the refusal fires everywhere.
+        try:
+            recorded = list(csv.DictReader(f))
+        except UnicodeDecodeError:
+            sys.exit(f"{args.replay} is not a text CSV this feed can replay "
+                     f"— it looks like UTF-16 or binary. If it came out of "
+                     f"Excel, re-save it as \"CSV UTF-8\"; the probe and the "
+                     f"feed both write that format directly.")
+    for row in recorded:
+        try:
+            rows.append((float(row["t_s"]),
+                         {0x0C: float(row["rpm"]),
+                          0x0D: float(row["speed_kmh"]),
+                          **({0x11: float(row["throttle_pct"])}
+                             if row.get("throttle_pct") else {})}))
+        except (KeyError, TypeError, ValueError):
+            continue
     if not rows:
         sys.exit(f"{args.replay}: no usable samples (need t_s,rpm,speed_kmh)")
     print(f"Replaying {len(rows)} samples from {args.replay} "
@@ -979,24 +998,91 @@ def main():
         ap.error("--speed must be > 0 (time still only runs forwards here)")
 
     calibration = load_json(args.calibration, "calibration")
+    # Valid JSON, wrong shape. The learner's write path already refuses this
+    # by name (probe/learn_throttle.py) — the feed reads the same hand-edited
+    # file, so it owes the same manners. The throttle section below has had
+    # them since the first QA pass; the rest of the file used to traceback,
+    # each section in its own novel way, lines away from the actual typo.
+    if not isinstance(calibration, dict):
+        sys.exit(f"{args.calibration} holds a JSON "
+                 f"{type(calibration).__name__}, not an object; a "
+                 f"calibration file is a {{...}} of sections.")
+
+    def _cal_section(key):
+        sec = calibration.get(key)
+        if sec is None:
+            return {}
+        if not isinstance(sec, dict):
+            sys.exit(f'{args.calibration}: the "{key}" key holds a JSON '
+                     f"{type(sec).__name__}, not an object; a {key} section "
+                     f"is a {{...}} of settings.")
+        return sec
+
+    def _cal_number(name, raw):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            sys.exit(f"{args.calibration}: {name} must be a number, "
+                     f"got {raw!r}.")
+        val = float(raw)
+        if not math.isfinite(val):
+            sys.exit(f"{args.calibration}: {name} is {val}, which is not a "
+                     f"real number.")
+        return val
+
+    _cal_section("units")   # shape only; display_units validates the value
     args.resolved_units = display_units(calibration, args.units)
 
-    gears = calibration.get("gears", {})
+    gears = _cal_section("gears")
     constants = gears.get("rpm_per_kmh")
     if not constants:
         sys.exit(f"{args.calibration} has no gears.rpm_per_kmh — run "
                  "probe/learn_gears.py on a drive log first (README: "
                  "'the drive protocol').")
-    tol = float(gears.get("tolerance_pct", 7))
+    if not isinstance(constants, list) or not all(
+            isinstance(c, (int, float)) and not isinstance(c, bool)
+            and math.isfinite(c) and c > 0 for c in constants):
+        # A lone float is the natural hand-edit ("it's one number per gear,
+        # I have one gear in mind"), and a string is iterable enough to die
+        # somewhere much stranger. Zero and NaN would divide or compare
+        # their way into a readout that can never match anything.
+        sys.exit(f"{args.calibration}: gears.rpm_per_kmh must be a list of "
+                 f"positive numbers, one per gear, 1st first — got "
+                 f"{constants!r}. Run probe/learn_gears.py on a drive log "
+                 f"to measure them.")
+    tol = _cal_number("gears.tolerance_pct", gears.get("tolerance_pct", 7))
+    if tol <= 0:
+        sys.exit(f"{args.calibration}: gears.tolerance_pct is {tol:g} — a "
+                 f"ratio reads as a gear only while it sits within this "
+                 f"band, so the width has to be positive (the seed ships 7).")
 
-    sets = calibration.get("tire_sets", {})
+    sets = _cal_section("tire_sets")
     active = calibration.get("active_set")
-    speed_factor = float(sets.get(active, {}).get("speed_factor", 1.0))
+    if active is not None and not isinstance(active, str):
+        sys.exit(f"{args.calibration}: active_set must name a tire_sets "
+                 f"entry, got {active!r}.")
+    if active is not None and active not in sets:
+        # The inert-config failure again, wearing tires this time: a typo'd
+        # set name would silently fall back to speed factor 1.0, and the
+        # whole point of the entry is that yours isn't.
+        sys.exit(f"{args.calibration}: active_set {active!r} names no entry "
+                 f"in tire_sets." + _did_you_mean(active, sorted(sets))
+                 + (f" Known sets: {', '.join(sorted(sets))}."
+                    if sets else " (tire_sets is empty.)"))
+    tire_set = sets.get(active) if active is not None else {}
+    if not isinstance(tire_set, dict):
+        sys.exit(f"{args.calibration}: tire_sets.{active} holds a JSON "
+                 f"{type(tire_set).__name__}, not an object; a tire set is "
+                 f"a {{...}} of settings.")
+    speed_factor = _cal_number(f"tire_sets.{active}.speed_factor",
+                               tire_set.get("speed_factor", 1.0))
+    if speed_factor <= 0:
+        sys.exit(f"{args.calibration}: tire_sets.{active}.speed_factor is "
+                 f"{speed_factor:g}; it multiplies OBD speed to get true "
+                 f"speed, so it has to be positive (stock is 1.0).")
 
     state = CarState(GearWatch(constants, tol, dwell_s=args.dwell),
                      speed_factor=speed_factor,
                      display_hold=(args.dash_gear == "hold"))
-    engine = calibration.get("engine", {})
+    engine = _cal_section("engine")
     # Absent a throttle section, 0..100 is the identity map: the feed sends
     # the raw pedal percentage exactly as it did before calibration existed.
     # Everything below is a named refusal rather than a bare float(): the
@@ -1057,8 +1143,10 @@ def main():
                  "probe/learn_throttle.py on a drive log.")
     packer = Packer(layout, cal={
         "max_gears": len(constants),
-        "max_rpm": float(engine.get("max_rpm", 0.0)),
-        "fuel_tank_l": float(engine.get("fuel_tank_l", 0.0)),
+        "max_rpm": _cal_number("engine.max_rpm",
+                               engine.get("max_rpm", 0.0)),
+        "fuel_tank_l": _cal_number("engine.fuel_tank_l",
+                                   engine.get("fuel_tank_l", 0.0)),
         "throttle_floor_pct": thr_floor,
         "throttle_ceiling_pct": thr_ceiling,
     })

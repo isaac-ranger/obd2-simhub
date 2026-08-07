@@ -68,10 +68,28 @@ with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
     f.write("t_s,rpm,speed_kmh,throttle_pct\n")
     f.write("0.2,1000,20,14.9\n")
     f.write("bad,row,here,\n")
-    f.write("0.4,1010,20.2,15.0\n")
+    f.write("0.3\n")                     # truncated row: DictReader hands the
+    f.write("0.4,1010,20.2,15.0\n")      # missing cells over as None
     tmp = f.name
 try:
-    ok("loader keeps good rows, drops junk", len(load_samples(tmp)) == 2)
+    ok("loader keeps good rows, drops junk and truncated rows",
+       len(load_samples(tmp)) == 2)
+finally:
+    _os.unlink(tmp)
+
+# --- a UTF-16 log refuses by name, matching learn_throttle's reader --------
+# Excel's "Unicode Text" save produces one; the strict utf-8 open makes it
+# fail the same way on every platform (cp1252 would otherwise decode it into
+# NUL-garbage and blame the columns), and the refusal says what to do.
+with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as f:
+    f.write("t_s,rpm,speed_kmh\n1,2000,50\n".encode("utf-16"))
+    tmp = f.name
+try:
+    load_samples(tmp)
+    ok("UTF-16 log refuses by name", False, "no SystemExit raised")
+except SystemExit as e:
+    ok("UTF-16 log refuses by name (re-save as CSV UTF-8)",
+       "CSV UTF-8" in str(e.code), str(e.code)[:160])
 finally:
     _os.unlink(tmp)
 

@@ -308,7 +308,8 @@ Source    -> COM3
 UDP feed  -> 127.0.0.1:35353  (101 bytes/packet at 60 Hz)
 Run log   -> runs\feed-last.csv  (tail of this run; previous run kept at feed-prev.csv; --run-log full to keep everything)
 Units     -> imperial   tire set -> street_18 (speed factor 1)
-Dash gear -> hold
+Dash gear -> hold  (holds last gear while rolling; log stays honest)
+Throttle  -> 16.5..85% pedal maps to 0..100% on the dash
 Contract  -> SimHub definition 9a62309a-… (layout v1.0)
 
 Adapter reset:     ELM327 v1.4b
@@ -320,8 +321,12 @@ Auto-tune: response-count digit (each candidate 2s)...
    digit 3  : 39.0 req/s, all 6 PIDs answered
    keeping: digit 3 (39.0 req/s)
 
-  t   42s  RPM  2100  speed  31  gear 3  throttle 18%  …
+  t    42s  RPM  2100  speed   31 mph (true)  gear 3  poll  4.7 Hz  udp 2520 pkts
 ```
+
+(The `Throttle ->` line reads `raw pass-through` until you've run
+`learn_throttle.py` — the feed says so, and names the command, rather than
+quietly sending a pedal that never reaches 100%.)
 
 **That last line, once a second, is the thing to watch.** If the numbers move
 when you blip the throttle, the whole chain works. Check SimHub's gauges are
