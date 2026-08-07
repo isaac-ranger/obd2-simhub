@@ -416,7 +416,18 @@ against now, and against `stale_after_s`. Field reference:
 
 ## No car? Try it anyway
 
-The repo ships its own fake car, so the whole pipeline runs on a desk:
+The repo ships its own fake car, so the whole pipeline runs on a desk — but
+one honest step first. The shipped `calibration.json` is deliberately empty
+(this repo doesn't presume to know your car), and the feed refuses to start
+without gear ratios. Teach it from the drive log the repo ships. Once, about
+a second:
+
+```
+py probe\learn_gears.py reports\2026-07-31-kris-drive_01.csv --write calibration.json
+```
+
+Now the fake car has gears to shift and you have a file that says where they
+are:
 
 ```
 py extractor\fake_car.py --tcp 35000                            # terminal 1

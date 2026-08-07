@@ -623,6 +623,29 @@ if pkts:
     ok("udp: gear rides along as text", d0["Gear"] in ("N", "3"),
        f"{d0['Gear']!r}")
 
+# ── the gears refusal itself ──────────────────────────────────────────────
+# A calibration with no gears must refuse to start, loudly, by name — that
+# is the shipped seed's whole first-run contract. Mutation testing proved
+# every suite stayed green with the refusal deleted (a fresh clone then died
+# with a bare TypeError instead), so this case drives the real main() the
+# way a fresh clone does: subprocess, gearless file, no fixture constants.
+import subprocess
+with tempfile.TemporaryDirectory() as td:
+    bare = os.path.join(td, "calibration.json")
+    with open(bare, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+    proc = subprocess.run(
+        [sys.executable, os.path.join(HERE, "obd_feed.py"),
+         "--replay", DRIVE, "--calibration", bare],
+        capture_output=True, text=True, timeout=60)
+    ok("bare calibration: feed refuses to start", proc.returncode != 0,
+       f"rc={proc.returncode}")
+    ok("bare calibration: refusal is named, not a traceback",
+       "has no gears.rpm_per_kmh" in proc.stderr
+       and "learn_gears" in proc.stderr
+       and "Traceback" not in proc.stderr,
+       proc.stderr.strip()[:120] or proc.stdout.strip()[:120])
+
 # ---------------------------------------------------------------------------------
 
 print()

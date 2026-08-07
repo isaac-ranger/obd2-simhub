@@ -12,10 +12,15 @@ only — a needle should sweep, a coolant gauge should not invent data.
 Usage (Windows, OBDLink MX+ over Bluetooth):
   py extractor\\obd_feed.py --port COM3
 
-Usage (no car needed — replay a recorded drive through the whole pipeline):
+Usage (no car needed — replay a recorded drive through the whole pipeline).
+The shipped calibration.json is deliberately empty, and the feed refuses to
+start without gear ratios, so teach it from the shipped drive log first
+(once, ~a second):
+  py probe\\learn_gears.py reports\\2026-07-31-kris-drive_01.csv --write calibration.json
   py extractor\\obd_feed.py --replay reports\\2026-07-31-kris-drive_01.csv
 
-Usage (no car, no log — against the fake car in another terminal):
+Usage (no car, no log — against the fake car in another terminal; needs the
+same one-time learn_gears step above):
   python extractor/fake_car.py --tcp 35000
   python extractor/obd_feed.py --port socket://127.0.0.1:35000
 
