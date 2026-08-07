@@ -107,6 +107,14 @@ FLAT_WARN_PCT = 5.0     # this much of a log pinned at 100% = the wall is a crui
 LOW_WALL_PCT = 70.0     # a pedal's mechanical stop sits near the top of its range
 MIN_SUSTAINED = 30      # samples on the wall below this = a brief hold, not a stop
 
+# Every key the feed's throttle section is allowed to carry. Must stay
+# identical to THROTTLE_KEYS in extractor/obd_feed.py — the feed refuses to
+# start on anything outside this set, so a --write that emitted a key the feed
+# rejects would hand the user a file its own tool told them would fix things.
+# probe/test_learn_throttle.py asserts the two sets are equal.
+THROTTLE_KEYS = {"floor_pct", "ceiling_pct", "measured_wall_pct",
+                 "learned_from", "learned_on", "_notes"}
+
 
 def load_samples(path):
     """Return [(rpm, speed_kmh, throttle_pct, load_pct_or_None)] from a log CSV.
@@ -222,7 +230,10 @@ def write_calibration(path, floor, ceiling, source, wall):
     """Replace the throttle constants in calibration file `path`, preserving
     the rest of the file; create a minimal one if it doesn't exist."""
     try:
-        with open(path) as f:
+        # Explicit UTF-8 both directions. The feed reads this file as strict
+        # UTF-8; on Windows the default here would be the locale codepage, so
+        # a pasted curly quote round-trips to mojibake or dies uncaught.
+        with open(path, encoding="utf-8") as f:
             cal = json.load(f)
     except FileNotFoundError:
         cal = {}  # a fresh install has no calibration yet; make it one
@@ -230,6 +241,11 @@ def write_calibration(path, floor, ceiling, source, wall):
         # A directory, a permission wall, a bad path. Name it — the read side
         # of this tool already does, and this is the side that can lose work.
         sys.exit(f"cannot read {path}: {e}")
+    except UnicodeDecodeError as e:
+        # Not UTF-8 at all — a file saved in a Windows codepage, or UTF-16.
+        # Named, because the traceback for this one says nothing useful.
+        sys.exit(f"{path} is not UTF-8 text ({e}); not touching it. Save it "
+                 f"as UTF-8 and re-run, or put the throttle section in by hand.")
     except json.JSONDecodeError as e:
         sys.exit(f"{path} is not valid JSON ({e}); not touching it")
     if os.path.isabs(source):
@@ -259,7 +275,26 @@ def write_calibration(path, floor, ceiling, source, wall):
                  f"a calibration file is a {{...}} of sections. The "
                  f"recommendation above is still good — put the throttle "
                  f"section in by hand.")
-    section = cal.setdefault("throttle", {})
+    existing = cal.get("throttle")
+    if existing is None:
+        existing = {}          # absent, or an explicit null someone wrote to
+                               # disable the section — both mean "start clean"
+    elif not isinstance(existing, dict):
+        # A number, a string, a list where a section belongs. Refuse by name
+        # rather than dying on .items() one line down; the recommendation the
+        # user just read is still good either way.
+        sys.exit(f'the "throttle" key in {path} holds a JSON '
+                 f"{type(existing).__name__}, not an object; a throttle "
+                 f"section is a {{...}} of settings. The recommendation above "
+                 f"is still good — replace that key by hand.")
+    # Keep only what the feed will accept. A hand-typed `celing_pct` sitting in
+    # the file makes the feed refuse to start, and the feed's own error tells
+    # the user to run this tool — so preserving the typo here would send them
+    # around that loop forever. The learner's output is the thing the feed
+    # promised would fix it; it has to actually be clean.
+    section = {k: v for k, v in existing.items() if k in THROTTLE_KEYS}
+    cal["throttle"] = section   # a comprehension is a NEW dict; setdefault used
+                                # to attach it for us and no longer does
     section["floor_pct"] = floor
     section["ceiling_pct"] = ceiling
     section["measured_wall_pct"] = wall
@@ -272,7 +307,7 @@ def write_calibration(path, floor, ceiling, source, wall):
     # platforms, so the file is either the old one or the new one.
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cal, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(tmp, path)

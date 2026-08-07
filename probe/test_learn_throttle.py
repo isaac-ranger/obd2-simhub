@@ -497,6 +497,93 @@ ok("a log with non-finite throttle values does not traceback",
 ok("...and the corrupt rows do not become the wall",
    "88.6" in out and "inf" not in out.lower(), out[-300:])
 
+
+# --- the brief-hold gate, which nothing was asserting ------------------------
+# Deleting the `wall < LOW_WALL_PCT or wall_n < MIN_SUSTAINED` branch from
+# main() left all 88 checks green while the mutant happily wrote a ceiling of
+# 57.6 at exit 0 for a log whose "wall" was six samples of a lift halfway up
+# the pedal. The gate was the headline of the commit that added it and it had
+# no test: the reference log trips it, but nothing looked at the return code.
+BRIEF_HOLD = ([f"{i},2500,90,16.5,3.0\n" for i in range(3000)]
+              + [f"{3000 + i},800,0,12.5,20.0\n" for i in range(6000)]
+              + [f"{9000 + i},3000,100,60.0,45.0\n" for i in range(6)])
+rc, out = learn_cli(BRIEF_HOLD)
+ok("main(): a brief hold partway up the pedal is not a wall", rc == 1, out[-300:])
+ok("...and the refusal explains the reasoning rather than stacking",
+   "Traceback" not in out and "mechanical stop" in out
+   and "wide-open pull" in out, out[-400:])
+
+# The other half of the same branch: a value repeated often enough to look
+# sustained, but too low on the range to be a mechanical stop.
+LOW_WALL = ([f"{i},2500,90,16.5,3.0\n" for i in range(3000)]
+            + [f"{3000 + i},800,0,12.5,20.0\n" for i in range(6000)]
+            + [f"{9000 + i},3000,100,55.0,45.0\n" for i in range(200)])
+rc, out = learn_cli(LOW_WALL)
+ok("main(): a sustained-but-low plateau is not a wall either", rc == 1,
+   out[-300:])
+
+# And the probe-shaped log, which trips this gate at HEAD — asserted here so
+# the earlier no-traceback checks can never be the only thing watching it.
+rc, out = learn_cli(PROBE_LOG)
+ok("main(): the probe-shaped log's six-sample pull is refused, not rounded",
+   rc == 1, out[-300:])
+
+
+# --- --write must emit a file the feed will actually accept -----------------
+# The feed refuses to start on an unknown key in the throttle section, and its
+# error tells the user to run this tool. If --write preserved the typo, that
+# instruction would be a loop: refuse -> learn -> refuse, exit 0 each time,
+# with the tool's own output as the thing being rejected.
+from learn_throttle import THROTTLE_KEYS as LEARNER_KEYS
+from extractor.obd_feed import THROTTLE_KEYS as FEED_KEYS
+
+ok("the learner and the feed agree on the legal key set",
+   LEARNER_KEYS == FEED_KEYS, f"{LEARNER_KEYS ^ FEED_KEYS}")
+
+with tempfile.TemporaryDirectory() as d:
+    target = os.path.join(d, "cal.json")
+    json.dump({"gears": {"3": 1.34}, "throttle": {"celing_pct": 85.0,
+                                                  "floor_pct": 9.9}},
+              open(target, "w"))
+    rc, out = learn_write(target)
+    written = json.load(open(target))
+    ok("--write drops a key the feed would refuse", rc == 0
+       and "celing_pct" not in written["throttle"], out[-300:])
+    ok("...and keeps the rest of the file", written.get("gears") == {"3": 1.34},
+       str(written)[:200])
+    ok("...and every key it emits is one the feed accepts",
+       set(written["throttle"]) <= FEED_KEYS, str(set(written["throttle"])))
+
+    # Nulling the section is a natural way to disable it by hand — the feed
+    # reads null as absent and runs the identity map. The learner used to
+    # meet that with a TypeError.
+    for label, value in (("null", None), ("a number", 85.0),
+                         ("a string", "off"), ("a list", [16.5, 85.0])):
+        json.dump({"throttle": value}, open(target, "w"))
+        rc, out = learn_write(target)
+        ok(f'--write survives a "throttle" key holding {label}',
+           "Traceback" not in out, out[-300:])
+    # null means start clean and succeed; the wrong-shape ones refuse by name.
+    json.dump({"throttle": None}, open(target, "w"))
+    rc, out = learn_write(target)
+    ok('--write treats "throttle": null as absent and writes', rc == 0
+       and json.load(open(target))["throttle"]["floor_pct"] == 16.5, out[-300:])
+
+    # Encoding: the feed reads this file as strict UTF-8, so the learner has
+    # to write it that way on every platform, and say so when it cannot read it.
+    json.dump({"throttle": {"_notes": "coast — foot fully off"}},
+              open(target, "w", encoding="utf-8"), ensure_ascii=False)
+    rc, out = learn_write(target)
+    ok("--write round-trips non-ASCII provenance as UTF-8", rc == 0
+       and "coast — foot fully off"
+       in open(target, encoding="utf-8").read(), out[-300:])
+
+    with open(target, "wb") as f:
+        f.write('{"throttle": {"_notes": "café"}}'.encode("utf-16"))
+    rc, out = learn_write(target)
+    ok("--write refuses a non-UTF-8 calibration by name, not by traceback",
+       rc == 1 and "Traceback" not in out and "UTF-8" in out, out[-300:])
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {FAILED}")
