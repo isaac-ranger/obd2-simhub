@@ -27,8 +27,15 @@ DRIVE = os.path.join(REPO, "reports", "2026-07-31-kris-drive_01.csv")
 
 with open(os.path.join(REPO, "calibration.json"), encoding="utf-8") as f:
     CAL = json.load(f)
-CONSTANTS = CAL["gears"]["rpm_per_kmh"]
-TOL = CAL["gears"]["tolerance_pct"]
+# The SHIPPED calibration.json deliberately carries no learned values — a
+# stranger's clone must not inherit one car's gear ratios and pedal span.
+# So the suite brings its own constants instead of reading whatever the repo
+# happens to ship. It used to read them, which meant these tests quietly
+# depended on us shipping a fully-learned config; emptying the seed file
+# broke seven of them and that coupling was the reason.
+CONSTANTS = CAL.get("gears", {}).get(
+    "rpm_per_kmh", [103.0, 60.4, 43.3, 35.0, 29.2, 25.2])
+TOL = CAL.get("gears", {}).get("tolerance_pct", 7)
 
 FAILED = []
 

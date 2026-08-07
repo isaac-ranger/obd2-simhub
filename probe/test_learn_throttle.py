@@ -259,6 +259,20 @@ REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
 FEED = os.path.join(REPO, "extractor", "obd_feed.py")
 REAL_CAL = os.path.join(REPO, "calibration.json")
 COAST_THR = 16.5  # the floor: identity sends 0.165, a wired feed sends 0.0
+# Gears the shipped seed config intentionally does NOT carry: a fresh clone
+# must refuse to start rather than hand a stranger one car's ratios. The feed
+# hard-exits without gears.rpm_per_kmh, so every fixture built from the real
+# calibration has to supply its own or it tests the refusal instead of the
+# throttle path.
+FIXTURE_GEARS = [103.0, 60.4, 43.3, 35.0, 29.2, 25.2]
+
+
+def cal_fixture():
+    """The shipped calibration, made runnable: real sections, test gears."""
+    base = json.load(open(REAL_CAL))
+    base.setdefault("gears", {})["rpm_per_kmh"] = FIXTURE_GEARS
+    base["gears"].setdefault("tolerance_pct", 7)
+    return base
 
 
 def replay_wire(cal_path, drive):
@@ -289,7 +303,7 @@ with tempfile.TemporaryDirectory() as d:
         for i in range(40):
             f.write(f"{i * 0.1:.1f},2000,80,{COAST_THR}\n")
 
-    base = json.load(open(REAL_CAL))
+    base = cal_fixture()
     wired_path = os.path.join(d, "wired.json")
     bare_path = os.path.join(d, "bare.json")
     base["throttle"] = {"floor_pct": COAST_THR, "ceiling_pct": 85.0}
@@ -330,6 +344,52 @@ with tempfile.TemporaryDirectory() as d:
                struct.unpack_from("<f", bare_pkts[-1], off)[0] !=
                struct.unpack_from("<f", wired_pkts[-1], off)[0])
 
+    # --- the startup visibility line ------------------------------------
+    # This line is the ONLY signal for the two routes the validation gate
+    # cannot see: a top-level typo ("throtle": {...}) and an explicit
+    # identity section. Both start clean at exit 0 with the map reverted to
+    # raw pass-through, so the gate is silent by construction and this
+    # sentence is the whole mitigation. A ship-qa mutation made it always
+    # claim a live map and both suites stayed green — it was paint. These
+    # read it.
+    ident_path = os.path.join(d, "identity.json")
+    typo_path = os.path.join(d, "typo.json")
+    base = cal_fixture()
+    base["throttle"] = {"floor_pct": 0.0, "ceiling_pct": 100.0}
+    json.dump(base, open(ident_path, "w"))
+    base.pop("throttle")
+    base["throtle"] = {"floor_pct": COAST_THR, "ceiling_pct": 85.0}
+    json.dump(base, open(typo_path, "w"))
+
+    _, ident_proc = replay_wire(ident_path, drive)
+    _, typo_proc = replay_wire(typo_path, drive)
+
+    def thr_line(proc):
+        for ln in proc.stdout.splitlines():
+            if ln.startswith("Throttle  ->"):
+                return ln
+        return ""
+
+    ok("startup line: a live map reports its own range",
+       thr_line(wired_proc).find(f"{COAST_THR:g}..85%") >= 0,
+       repr(thr_line(wired_proc)))
+    ok("startup line: no section says so, and says what to run",
+       "no throttle section" in thr_line(bare_proc)
+       and "learn_throttle.py" in thr_line(bare_proc),
+       repr(thr_line(bare_proc)))
+    # The one that was false before F5: an explicit 0..100 section printed
+    # "no throttle section in calibration.json" — a claim about the file
+    # that the file contradicts. It must report pass-through WITHOUT
+    # denying the section exists.
+    ok("startup line: an explicit identity section is not called absent",
+       "raw pass-through" in thr_line(ident_proc)
+       and "no throttle section" not in thr_line(ident_proc),
+       repr(thr_line(ident_proc)))
+    ok("startup line: a top-level typo reads as absent and starts clean",
+       typo_proc.returncode == 0
+       and "no throttle section" in thr_line(typo_proc),
+       f"rc={typo_proc.returncode} {thr_line(typo_proc)!r}")
+
 
 # --- the feed's OWN validation gate ------------------------------------------
 # The suite above proves the wiring works when the section is good. It says
@@ -344,7 +404,7 @@ with tempfile.TemporaryDirectory() as d:
         f.write("t_s,rpm,speed_kmh,throttle_pct\n")
         for i in range(20):
             f.write(f"{i * 0.1:.1f},2000,80,{COAST_THR}\n")
-    base = json.load(open(REAL_CAL))
+    base = cal_fixture()
     base.pop("throttle", None)
 
     BAD = [

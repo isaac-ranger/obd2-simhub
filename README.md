@@ -177,6 +177,21 @@ py probe\learn_gears.py drive.csv --write calibration.json
 The ratio histogram clusters at one spike per gear, and those centers *are*
 your gearbox as the ECU reports it.
 
+**This step is not optional, and the feed will tell you so.** The
+`calibration.json` in this repo ships with **no learned values** — no gear
+ratios, no throttle span. That's deliberate: those numbers are one specific
+car's, and inheriting someone else's would put a silently wrong gear on your
+dash rather than an obvious error. So a fresh clone refuses to start:
+
+```
+calibration.json has no gears.rpm_per_kmh — run probe/learn_gears.py on a
+drive log first (README: 'the drive protocol').
+```
+
+That refusal is the intended first run. The throttle section is the softer
+half — leave it unlearned and the feed starts fine and passes the pedal
+through raw, saying so on the way up.
+
 ### Same drive, second thing to learn: the throttle
 
 The throttle PID doesn't read 0–100 on a real car. Foot completely off, the
@@ -186,11 +201,18 @@ any drive mode, across six logs including a 7,532 rpm pull. Sent straight
 through, an overlay shows moderate throttle while you coast and never reaches
 100% on a pull you buried the pedal for.
 
-Two numbers fix it, from the same log:
+Two numbers fix it, from a drive log:
 
 ```
 py probe\learn_throttle.py drive.csv --write calibration.json
 ```
+
+One catch, and the learner will tell you about it rather than guessing: the
+**coast** floor needs a *feed run log* (step 4), because it selects on engine
+load and `obd_probe.py --log` doesn't record that column. Run it against a
+probe log and you get the **idle** floor instead — a real number, printed with
+a note saying which one you got, and a couple of percent low. Re-learn after
+your first feed drive and the coast floor replaces it.
 
 It prints the floor, the ceiling, and **every sample count behind them**, so
 you can see whether your drive earned the answer rather than taking its word:

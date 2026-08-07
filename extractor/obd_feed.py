@@ -1000,6 +1000,12 @@ def main():
     # name — Python's json accepts it, every comparison against it is False,
     # so it slips the span check below and pins the wire to 0.0 in silence.
     throttle = calibration.get("throttle")
+    # Kept separately from `throttle` itself: the startup line has to tell a
+    # missing section apart from a present one that happens to spell the
+    # identity map, and by the time the defaults are folded in the two look
+    # alike. A top-level typo ("throtle") lands here as absent, which is the
+    # honest reading — nothing named `throttle` was found.
+    throttle_present = throttle is not None
     if throttle is None:
         throttle = {}
     if not isinstance(throttle, dict):
@@ -1097,12 +1103,29 @@ def main():
     print(f"Dash gear -> {args.dash_gear}"
           + ("  (holds last gear while rolling; log stays honest)"
              if args.dash_gear == "hold" else ""))
-    print(f"Throttle  -> " + (
-        f"{thr_floor:g}..{thr_ceiling:g}% pedal maps to 0..100% on the dash"
-        if (thr_floor, thr_ceiling) != (0.0, 100.0) else
-        "raw pass-through (no throttle section in "
-        f"{os.path.basename(args.calibration)}; "
-        "run probe/learn_throttle.py on a drive log)"))
+    if (thr_floor, thr_ceiling) != (0.0, 100.0):
+        thr_line = (f"{thr_floor:g}..{thr_ceiling:g}% pedal maps to "
+                    f"0..100% on the dash")
+    elif throttle_present and {"floor_pct", "ceiling_pct"} & set(throttle):
+        # A section that spells 0..100 is the identity map. Saying "no
+        # throttle section" here would be false, and falsely reassuring in
+        # the wrong direction: it reads as "you forgot to calibrate" when
+        # the truth is "you calibrated it to do nothing."
+        thr_line = (f"raw pass-through (the throttle section in "
+                    f"{os.path.basename(args.calibration)} spells "
+                    f"0..100, which is the identity map)")
+    else:
+        # Absent, or present carrying no mapping keys — which is exactly
+        # what the SHIPPED calibration.json looks like, so this is the
+        # first thing most people ever read about throttle. It has to name
+        # the command, not just the condition.
+        where = ("no throttle section in" if not throttle_present
+                 else "no floor/ceiling set in the throttle section of")
+        thr_line = (f"raw pass-through ({where} "
+                    f"{os.path.basename(args.calibration)}; run "
+                    f"probe/learn_throttle.py <drive log> --write "
+                    f"{os.path.basename(args.calibration)})")
+    print(f"Throttle  -> " + thr_line)
     print(f"Contract  -> SimHub definition {layout.get('unique_id')} "
           f"(layout v{layout['header'][2].get('value', '?')}."
           f"{layout['header'][3].get('value', '?')})")

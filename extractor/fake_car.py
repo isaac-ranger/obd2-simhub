@@ -14,7 +14,7 @@ gear inference, UDP feed) runs against it end to end.
   python extractor/obd_feed.py --port socket://127.0.0.1:35000
 
 The simulated drive: idle, then pull away and shift up through all six gears
-using the real learned constants from calibration.json, cruise, and back
+using learned constants from calibration.json when it has them, cruise, and back
 down. Not a physics model — a gear-shaped signal generator. The point is
 that the feed's readout should agree with what this script *meant*.
 
@@ -54,11 +54,19 @@ def _bitmap(base, pids, more):
 class FakeCar:
     """Scripted drive with a real gearbox shape."""
 
+    # A six-speed shape to simulate when the calibration carries none. The
+    # shipped calibration.json deliberately has no learned gears — a clone
+    # must not inherit one car's ratios — and the simulator is the one
+    # consumer that should keep working anyway: it invents a car by
+    # definition, so it needs plausible ratios, not YOUR ratios.
+    DEFAULT_CONSTANTS = [103.0, 60.4, 43.3, 35.0, 29.2, 25.2]
+
     def __init__(self, constants=None):
         if constants is None:
             with open(os.path.join(REPO, "calibration.json"),
                       encoding="utf-8") as f:
-                constants = json.load(f)["gears"]["rpm_per_kmh"]
+                constants = json.load(f).get("gears", {}).get(
+                    "rpm_per_kmh") or self.DEFAULT_CONSTANTS
         self.constants = constants
         self.t0 = time.monotonic()
         # (duration_s, gear, start_speed, end_speed) — gear 0 = clutch in /
