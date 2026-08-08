@@ -160,6 +160,22 @@ ok("a never-held lump is rejected as a gear", len(gears) == 2, f"got {len(gears)
 ok("...naming the missing hold",
    any("held" in c["why"] for c in rejected), f"got {rejected}")
 
+# --- the evidence-share floor exists and SCALES ----------------------------
+# QA on a5c4d17: floor_n = max(MIN_CLUSTER, frac-of-steady) mutated down to
+# plain MIN_CLUSTER left every suite green — on a dense log the frac term is
+# the only thing standing between accumulated debris and the gear table, and
+# the hold/idle guards mask it on every real log we own. 4,012 steady
+# samples put the floor at 20; a 12-sample lump that is genuinely HELD at
+# driving rpm (no other guard wants it) must die by share, by name.
+log = [(i * 0.2, 60.0 * 40.0, 40.0) for i in range(2001)]
+log += [(500.0 + i * 0.2, 43.0 * 46.5, 46.5) for i in range(2001)]
+log += [(1000.0 + i * 0.2, 35.0 * 50.0, 50.0) for i in range(13)]
+gears, rejected = cluster(steady_ratios(log))
+ok("evidence-share floor: the two driven gears stand", len(gears) == 2,
+   f"got {len(gears)}")
+ok("evidence-share floor: a held 12-sample lump dies by share, by name",
+   any("of steady" in c["why"] for c in rejected), f"got {rejected}")
+
 # --- spread is a HALF-width: a band spanning 58..62 around 60 is ±3.3% ----
 # The band is continuous (every bin populated): to a density clusterer,
 # isolated spikes with empty bins between them are separate structures —
@@ -200,6 +216,37 @@ with tempfile.TemporaryDirectory() as d:
     except SystemExit:
         ok("invalid-JSON target refuses and is not clobbered",
            open(bad).read() == "{not json")
+
+# ── the gears-count refusal itself, through the real CLI ──────────────────
+# QA on a5c4d17: with main()'s FAIL branch deleted, every suite stayed green
+# while the mutant printed a 4-gear table, exited 0, and WROTE the
+# calibration. Same class and same cure as the feed's bare-calibration test:
+# subprocess, real argv, no fixture constants — the way a fresh clone runs
+# it. --config points at an empty file so the repo's own config.json can
+# never lend the test a setting it didn't declare.
+import subprocess
+HERE = os.path.dirname(os.path.abspath(__file__))
+with tempfile.TemporaryDirectory() as d:
+    short = _os.path.join(d, "two_gears.csv")
+    with open(short, "w", newline="") as f:
+        f.write("t_s,rpm,speed_kmh\n")
+        for t, rpm, v in (synth(60.0, 20, v0=2000.0 / 60.0)
+                          + synth(43.0, 20, v0=2000.0 / 43.0, t0=50.0)):
+            f.write(f"{t},{rpm},{v}\n")
+    cal = _os.path.join(d, "calibration.json")
+    cfg = _os.path.join(d, "config.json")
+    open(cfg, "w").write("{}")
+    proc = subprocess.run(
+        [sys.executable, _os.path.join(HERE, "learn_gears.py"), short,
+         "--gears", "6", "--write", cal, "--config", cfg],
+        capture_output=True, text=True)
+    ok("CLI: a 2-gear log against --gears 6 refuses with nonzero exit",
+       proc.returncode != 0, f"rc={proc.returncode}")
+    ok("CLI: the refusal is named, not a traceback",
+       "FAIL" in proc.stderr and "Traceback" not in proc.stderr,
+       f"stderr={proc.stderr[:200]!r}")
+    ok("CLI: a refused run writes nothing",
+       not _os.path.exists(cal), "calibration.json exists after a FAIL")
 
 print()
 if FAILED:
