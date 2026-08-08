@@ -32,7 +32,7 @@ SIX = [103.0, 60.4, 43.3, 35.0, 29.2, 25.2]
 log = []
 for g in SIX:
     log += synth(g, 20, v0=2000.0 / g, t0=len(log) * 0.2)
-gears = cluster(steady_ratios(log))
+gears, _ = cluster(steady_ratios(log))
 ok("six clean gears found", len(gears) == 6, f"got {len(gears)}")
 ok("ordered highest-first (1st gear first)",
    [c["rpm_per_kmh"] for c in gears] == sorted((c["rpm_per_kmh"] for c in gears), reverse=True))
@@ -41,13 +41,13 @@ ok("medians land on the planted ratios",
    f"got {[c['rpm_per_kmh'] for c in gears]}")
 
 # --- shift transients between gears drop out -------------------------------
-log = synth(60.0, 20)
+log = synth(60.0, 20, v0=2000.0 / 60.0)
 # a shift: ratio sweeping 60 -> 43 across a few samples (clutch out, revs falling)
 for i, q in enumerate([57.0, 53.0, 49.0, 46.0]):
     v = 35.0 + i
     log.append((100.0 + i * 0.2, q * v, v))
 log += synth(43.0, 20, v0=40.0, t0=110.0)
-gears = cluster(steady_ratios(log))
+gears, _ = cluster(steady_ratios(log))
 ok("shift transient yields two gears, not three", len(gears) == 2, f"got {len(gears)}")
 
 # --- idle, Auto-Stop zeros, and crawl speeds are not data ------------------
@@ -55,12 +55,17 @@ log = [(0.0, 0.0, 0.0), (0.2, 0.0, 0.0),          # Auto-Stop: engine off
        (0.4, 800.0, 0.0), (0.6, 800.0, 0.0)]      # idling at a stop
 log += [(1.0 + i * 0.2, 2000.0, 3.0) for i in range(10)]   # parking-lot crawl
 ok("engine-off / idle / crawl produce no clusters",
-   cluster(steady_ratios(log)) == [])
+   cluster(steady_ratios(log)) == ([], []))
 
-# --- tiny clusters (debris) are dropped ------------------------------------
-log = synth(60.0, 20) + synth(43.0, MIN_CLUSTER - 2, t0=50.0)
-gears = cluster(steady_ratios(log))
+# --- tiny clusters (debris) are dropped, and the rejection says why --------
+# MIN_CLUSTER - 1 samples: enough density to be looked at, too few to count.
+log = synth(60.0, 20, v0=2000.0 / 60.0) + synth(43.0, MIN_CLUSTER - 1,
+                                                v0=2000.0 / 43.0, t0=50.0)
+gears, rejected = cluster(steady_ratios(log))
 ok("cluster below MIN_CLUSTER is debris", len(gears) == 1, f"got {len(gears)}")
+ok("...and is rejected by name",
+   len(rejected) == 1 and "samples" in rejected[0]["why"],
+   f"got {rejected}")
 
 # --- loader tolerates extra columns and junk rows --------------------------
 import tempfile, os as _os
@@ -106,18 +111,69 @@ finally:
     _os.unlink(tmp)
 
 # --- empty input is an empty answer, not a crash ---------------------------
-ok("empty log clusters to nothing", cluster([]) == [] and steady_ratios([]) == [])
+ok("empty log clusters to nothing",
+   cluster([]) == ([], []) and steady_ratios([]) == [])
 
-# --- spread is a HALF-width: a cluster spanning 58..62 around 60 is ±3.3% --
+# --- THE CHAINING DEFECT (2026-08-07, Kris's dense logs): debris between ---
+# gears must not link everything into one cluster. Six held gears, plus a
+# steady-passing debris pair every 2% across the whole ratio range — under
+# sorted-neighbour gap splitting no consecutive pair ever jumps 8%, so this
+# exact shape collapsed to 1 cluster at ±222%. Density bumps must not chain.
+log = []
+for g in SIX:
+    log += synth(g, 20, v0=2000.0 / g, t0=len(log) * 0.2)
+t, q = 1000.0, 24.0
+while q < 110.0:
+    v = 2500.0 / q                       # debris at driving rpm, so the idle
+    log += [(t, q * v, v), (t + 0.2, q * v, v)]   # veto isn't what kills it
+    t, q = t + 10.0, q * 1.02
+gears, _ = cluster(steady_ratios(log))
+ok("dense inter-gear debris does not chain six gears into one",
+   len(gears) == 6, f"got {len(gears)}")
+ok("...and the medians still land on the planted ratios",
+   all(abs(c["rpm_per_kmh"] - want) / want < 0.02 for c, want in zip(gears, SIX)),
+   f"got {[c['rpm_per_kmh'] for c in gears]}")
+ok("...with single-digit spreads",
+   all(c["spread_pct"] < 5.0 for c in gears),
+   f"got {[c['spread_pct'] for c in gears]}")
+
+# --- idle creep is not a gear, however long it holds -----------------------
+# Rolling at ~1000 rpm in neutral: tight ratio, real hold, engine idling.
+log = synth(60.0, 20, v0=2000.0 / 60.0) + synth(43.0, 20, v0=2000.0 / 43.0,
+                                                t0=50.0)
+log += [(100.0 + i * 0.2, 1001.0, 11.0) for i in range(12)]
+gears, rejected = cluster(steady_ratios(log))
+ok("idle-band creep is rejected as a gear", len(gears) == 2, f"got {len(gears)}")
+ok("...naming the idle band",
+   any("idle" in c["why"] for c in rejected), f"got {rejected}")
+
+# --- a lump that is never HELD is not a gear -------------------------------
+# Four 3-sample bursts at the same ratio, 10s apart: 12 tight samples at
+# driving rpm that no one ever held for HOLD_S.
+log = synth(60.0, 20, v0=2000.0 / 60.0) + synth(43.0, 20, v0=2000.0 / 43.0,
+                                                t0=50.0)
+for burst in range(4):
+    t0 = 200.0 + burst * 10.0
+    log += [(t0 + i * 0.2, 50.0 * 50.0, 50.0) for i in range(3)]
+gears, rejected = cluster(steady_ratios(log))
+ok("a never-held lump is rejected as a gear", len(gears) == 2, f"got {len(gears)}")
+ok("...naming the missing hold",
+   any("held" in c["why"] for c in rejected), f"got {rejected}")
+
+# --- spread is a HALF-width: a band spanning 58..62 around 60 is ±3.3% ----
+# The band is continuous (every bin populated): to a density clusterer,
+# isolated spikes with empty bins between them are separate structures —
+# merging anything within 8% regardless was the chaining defect.
 from learn_gears import write_calibration
-flat = cluster([58.0] * 5 + [60.0] * 10 + [62.0] * 5)
+flat, _ = cluster([(i * 0.2, q, q * 30.0) for i, q in
+                   enumerate(58.0 + 0.25 * j for j in range(17))])
 ok("spread_pct is the half-width of the band",
    len(flat) == 1 and abs(flat[0]["spread_pct"] - 3.3) < 0.05,
-   f"got {flat and flat[0]['spread_pct']}")
+   f"got {len(flat)} clusters, {flat and flat[0]['spread_pct']}")
 
 # --- write_calibration: fresh file gets defaults, existing keys survive ----
 import json
-gears_fixture = cluster(steady_ratios(synth(60.0, 20, v0=2000.0 / 60.0)))
+gears_fixture, _ = cluster(steady_ratios(synth(60.0, 20, v0=2000.0 / 60.0)))
 with tempfile.TemporaryDirectory() as d:
     fresh = _os.path.join(d, "new.json")
     write_calibration(fresh, gears_fixture, "some/log.csv")
