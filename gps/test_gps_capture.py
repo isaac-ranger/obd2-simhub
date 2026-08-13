@@ -47,8 +47,10 @@ class Script:
         self.chunks = list(chunks)
         self.clock = clock
         self.step = step
+        self.reads = 0
 
     def read(self, n=256):
+        self.reads += 1
         if self.clock is not None:
             self.clock.t += self.step
         if not self.chunks:
@@ -143,9 +145,15 @@ n, out, src = capture([b"$GPGGA,%d*00\r\n" % i for i in range(100)],
 ok("capture: the deadline stops the loop with chunks still unread",
    len(src.chunks) > 0 and 0 < n < 100, f"n={n} left={len(src.chunks)}")
 
+# The read count is the discriminator here, not the line count: a loop that
+# spins on empty reads until the deadline still writes n==1 and drains the
+# script, so those assertions alone pass with the exact defect this test
+# exists to catch (ship-qa proved it by mutation). break = exactly 2 reads;
+# spin = hundreds.
 n, out, src = capture([b"$GPGGA,only*00\r\n"], secs=60.0, step=0.1)
 ok("capture: EOF breaks the loop instead of spinning on empty reads",
-   n == 1 and src.chunks == [], f"n={n}")
+   n == 1 and src.chunks == [] and src.reads == 2,
+   f"n={n} reads={src.reads}")
 
 n, out, _ = capture([b"$GPGGA,before*00\r\n", KeyboardInterrupt,
                      b"$GPGGA,never*00\r\n"])

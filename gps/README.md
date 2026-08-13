@@ -42,6 +42,11 @@ No pyserial, no dependencies — plain python3 as it ships on macOS. Second
 argument is seconds (default 60). Ctrl-C ends a capture early and keeps
 everything framed so far; a short capture is still a good capture.
 
+One honesty note: the deadline only ticks between reads, so a port that
+opens but never says anything sits blocked in the first read — past any
+deadline — until you Ctrl-C it. A capture that refuses to end on its own is
+therefore itself a finding: the device paired, but it isn't talking.
+
 Output lands in `xgps160-capture.txt` in the directory you ran from: one
 sentence per line, each prefixed with seconds-since-start to the
 millisecond and a tab. That first column is the entire point of the tool —
