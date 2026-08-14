@@ -1,9 +1,16 @@
 /* Ego-centered GPS trail. Defaults are magic numbers for v1; some already
-   accept URL params (?meters=, ?up=, ?smooth=).
+   accept URL params (?meters=, ?metersMax=, ?up=, ?smooth=, ?bg=, ?hud=).
 
    ?up=north   (default) — map North-up; arrow rotates with heading
    ?up=heading           — arrow fixed pointing up; map rotates with heading
    ?smooth=off           — draw /live's raw_lat/raw_lon, no bridging, no trail skip
+   ?meters=200           — floor: metres across the short edge (default 200)
+   ?metersMax=1000       — cap: ease out this far to keep the trail on screen
+                           (equal to ?meters= locks the old fixed scale)
+   ?bg=transparent       — default; OBS composites the trail over video
+   ?bg=grey              — solid bench so the dark trail edge is visible
+   ?bg=dark              — original near-black stage
+   ?hud=on               — show the status line (hidden by default)
 
    Rates: the receiver speaks at ~10 Hz and the poll matches it, but the
    draw loop runs on requestAnimationFrame capped near 30 Hz. Repainting
@@ -27,12 +34,21 @@
   "use strict";
 
   // --- v1 constants (street/track driving; URL params later) ---
-  var DEFAULT_METERS_ACROSS = 200;   // shorter canvas edge
+  var DEFAULT_METERS_ACROSS = 200;   // shorter canvas edge (floor)
+  var DEFAULT_METERS_MAX = 1000;     // zoom-out cap; freeway trails will hit it
+  var TRAIL_FIT_PAD = 1.1;           // keep the farthest point off the bezel
+  var SCALE_OUT_TAU_MS = 400;        // zoom out promptly
+  var SCALE_IN_TAU_MS = 2500;        // ease back toward the floor more slowly
   var POLL_MS = 100;                 // match ~10 Hz GPS
   var DRAW_HZ = 30;                  // paint rate, decoupled from the GPS
   // Skip trail points closer than this so idle GPS wander does not scribble.
+  // The trail is a time window, not a point budget: a count cap made the
+  // two views cover different drives. Raw at 10 Hz filled 5000 points in
+  // ~8 minutes; the 3 m gate stretched the default toward ~25 at road
+  // speed and appended nothing at a light — so a long red light spent
+  // the raw buffer on a two-meter circle and ate the approach.
   var TRAIL_MIN_M = 3;
-  var TRAIL_MAX_POINTS = 5000;
+  var TRAIL_MAX_MS = 10 * 60 * 1000;
   var ARROW_PX = 28;
   var LIVE_URL = "/live";
 
@@ -48,23 +64,42 @@
   var STALE_MS = 1000;
   var DR_MIN_KMH = 1.0;              // below this, standing still: no DR
   var SNAP_M = 25;                   // a jump this big is a teleport, not motion
+  var TRAIL_CORE = "rgba(80, 200, 255, 0.85)";
+  var TRAIL_CORE_W = 5;
+  var TRAIL_EDGE = "#111111";
+  var TRAIL_EDGE_W = 10;
 
   var params = new URLSearchParams(window.location.search);
-  var metersAcross = parseFloat(params.get("meters"));
-  if (!isFinite(metersAcross) || metersAcross <= 0) {
-    metersAcross = DEFAULT_METERS_ACROSS;
+  var metersFloor = parseFloat(params.get("meters"));
+  if (!isFinite(metersFloor) || metersFloor <= 0) {
+    metersFloor = DEFAULT_METERS_ACROSS;
   }
+  var metersMax = parseFloat(params.get("metersMax"));
+  if (!isFinite(metersMax) || metersMax <= 0) {
+    metersMax = DEFAULT_METERS_MAX;
+  }
+  if (metersMax < metersFloor) metersMax = metersFloor;
+  var metersAcross = metersFloor;    // live scale; eases between floor and cap
   var upMode = (params.get("up") || "north").toLowerCase();
   if (upMode !== "north" && upMode !== "heading") {
     upMode = "north";
   }
   var smooth = (params.get("smooth") || "on").toLowerCase() !== "off";
+  var bgName = (params.get("bg") || "transparent").toLowerCase();
+  var bgColor = "transparent";
+  if (bgName === "grey" || bgName === "gray") bgColor = "#c5ccd4";
+  else if (bgName === "dark") bgColor = "#0b0f14";
+  document.documentElement.style.background = bgColor;
+  document.body.style.background = bgColor;
+  var showHud = (params.get("hud") || "off").toLowerCase() === "on";
 
   var canvas = document.getElementById("map");
   var ctx = canvas.getContext("2d");
+  var hudEl = document.getElementById("hud");
   var statusEl = document.getElementById("status");
+  if (hudEl && !showHud) hudEl.style.display = "none";
 
-  var trail = [];      // [{lat, lon}, ...] absolute, from real fixes only
+  var trail = [];      // [{lat, lon, tMs}, ...] absolute, from real fixes only
   var fix = null;      // newest server snapshot
   var fixAtMs = 0;     // performance.now() when a NEW fix landed
   var fixT = null;     // server timestamp of that fix, to spot repeats
@@ -137,8 +172,16 @@
     return { lat: f.lat, lon: f.lon };
   }
 
+  function expireTrail(nowMs) {
+    var cutoff = nowMs - TRAIL_MAX_MS;
+    var i = 0;
+    while (i < trail.length && trail[i].tMs < cutoff) i++;
+    if (i > 0) trail.splice(0, i);
+  }
+
   function maybeAppendTrail(lat, lon) {
-    var p = { lat: lat, lon: lon };
+    var nowMs = window.performance.now();
+    var p = { lat: lat, lon: lon, tMs: nowMs };
     if (trail.length === 0) {
       trail.push(p);
       return;
@@ -146,11 +189,14 @@
     // The 3 m skip is a view opinion: idle wander should not scribble
     // the default trail. smooth=off keeps every sample so the A/B is
     // actually the receiver, not the receiver minus close points.
-    if (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M) return;
-    trail.push(p);
-    if (trail.length > TRAIL_MAX_POINTS) {
-      trail.splice(0, trail.length - TRAIL_MAX_POINTS);
+    // Expire even when we skip — a frozen default view still has to
+    // drop the same old minutes the raw view does.
+    if (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M) {
+      expireTrail(nowMs);
+      return;
     }
+    trail.push(p);
+    expireTrail(nowMs);
   }
 
   /* Where the camera should be right now, given the newest fix and how long
@@ -181,6 +227,40 @@
     render.lat += (target.lat - render.lat) * kPos;
     render.lon += (target.lon - render.lon) * kPos;
     render.heading = angleLerp(render.heading, target.heading, kHdg);
+  }
+
+  function trailRadiusM(lat0, lon0) {
+    var r = 0;
+    var origin = { lat: lat0, lon: lon0 };
+    for (var i = 0; i < trail.length; i++) {
+      var d = distM(origin, trail[i]);
+      if (d > r) r = d;
+    }
+    return r;
+  }
+
+  /* Metres-across that would fit the trail on the short edge, clamped
+     to the floor/cap. World radius from the car, not a screen box, so
+     heading-up rotation does not pump the zoom. */
+  function neededMeters(lat0, lon0) {
+    var r = trailRadiusM(lat0, lon0);
+    if (r <= 0) return metersFloor;
+    var fit = 2 * r * TRAIL_FIT_PAD;
+    if (fit <= metersFloor) return metersFloor;
+    if (fit >= metersMax) return metersMax;
+    return fit;
+  }
+
+  function advanceScale(dtMs) {
+    if (!render || metersMax <= metersFloor) return;
+    var needed = neededMeters(render.lat, render.lon);
+    if (Math.abs(needed - metersAcross) < 0.5) {
+      metersAcross = needed;
+      return;
+    }
+    var tau = (needed > metersAcross) ? SCALE_OUT_TAU_MS : SCALE_IN_TAU_MS;
+    var k = 1 - Math.exp(-dtMs / tau);
+    metersAcross += (needed - metersAcross) * k;
   }
 
   function draw() {
@@ -233,9 +313,8 @@
       ctx.fill();
     }
 
-    // Trail (world moves under a fixed center; may also rotate if up=heading)
-    ctx.strokeStyle = "rgba(80, 200, 255, 0.85)";
-    ctx.lineWidth = 2;
+    // Trail: same path twice — dark edge under the cyan core so the
+    // line still reads when a similar colour sits behind it.
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -250,7 +329,14 @@
         ctx.lineTo(pt.x, pt.y);
       }
     }
-    if (started) ctx.stroke();
+    if (started) {
+      ctx.strokeStyle = TRAIL_EDGE;
+      ctx.lineWidth = TRAIL_EDGE_W;
+      ctx.stroke();
+      ctx.strokeStyle = TRAIL_CORE;
+      ctx.lineWidth = TRAIL_CORE_W;
+      ctx.stroke();
+    }
 
     // Arrow: rotates in north-up; fixed pointing up in heading-up
     var arrowHdg = (upMode === "heading") ? 0 : heading;
@@ -273,7 +359,7 @@
       pos.lat.toFixed(6) + ", " + pos.lon.toFixed(6) +
       "  " + fix.speed_kmh.toFixed(1) + " km/h  hdg " +
       (Math.round(heading) % 360) + "°  up=" + upMode +
-      (smooth ? "" : "  smooth=off") + "  " + metersAcross +
+      (smooth ? "" : "  smooth=off") + "  " + Math.round(metersAcross) +
       " m  trail " + trail.length + acc + sats;
   }
 
@@ -305,6 +391,7 @@
     if (dtMs < 1000 / DRAW_HZ - 1) return;
     lastFrameMs = nowMs;
     if (fix && fix.ok) advanceRender(nowMs, dtMs);
+    if (render) advanceScale(dtMs);
     draw();
   }
 

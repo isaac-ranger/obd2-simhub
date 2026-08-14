@@ -185,9 +185,10 @@ anyone your house.
 
 Ego-centered, North-up map: arrow pinned to the center, rotates with
 heading (last COG held in the crawl), trail scrolls under the car.
-Fixed scale (default 200 m across the shorter window edge — street/track
-driving). Browser owns the trail (refresh clears it). Separate process
-from the OBD feed and from the capture tool.
+Scale starts at 200 m across the shorter window edge and eases out
+toward a cap to keep the trail on screen. Browser owns the trail
+(refresh clears it). Separate process from the OBD feed and from the
+capture tool.
 
 The live door is the same two-door open the capture tool uses — a `COMn`
 name goes through pyserial, a `/dev/cu.*` path is a plain file open. Same
@@ -205,15 +206,31 @@ Open in Chrome or an OBS browser source:
 
 ```
 http://127.0.0.1:8765/
+http://127.0.0.1:8765/?bg=grey
+http://127.0.0.1:8765/?hud=on
 http://127.0.0.1:8765/?meters=200
+http://127.0.0.1:8765/?meters=200&metersMax=1000
+http://127.0.0.1:8765/?meters=200&metersMax=200
 http://127.0.0.1:8765/?up=heading
 http://127.0.0.1:8765/?meters=200&up=heading
 http://127.0.0.1:8765/?smooth=off
 ```
 
-OBS sets pixel Width × Height; the page fills the window. World scale is
-`?meters=` (default 200). Use `?meters=50` if you want the old walking
-yard for paddock testing. Orientation is `?up=north` (default — map
+OBS sets pixel Width × Height; the page fills the window. The page is
+transparent by default so an OBS browser source composites the trail
+over video; `?bg=grey` is the solid bench that makes the dark trail
+edge visible in Chrome, and `?bg=dark` is the original near-black
+stage. The status line (coords, speed, scale) is hidden until
+`?hud=on` — OBS does not need it, Chrome debugging does. World scale is
+`?meters=` (floor, default 200) and `?metersMax=` (cap, default 1000).
+While the trail's farthest point from the car fits in the floor, the
+view stays there. When it would run off the short edge, the scale eases
+out toward the cap — world radius, so `?up=heading` does not pump the
+zoom as you turn — and eases back in more slowly when the trail fits
+again. Set `?metersMax=` equal to `?meters=` to lock the old fixed
+scale. A ten-minute freeway trail will hit the cap; that is the point
+of the cap. Use `?meters=50` if you want the old walking yard for
+paddock testing. Orientation is `?up=north` (default — map
 North-up, arrow rotates) or `?up=heading` (arrow fixed pointing up, map
 rotates with course). Other knobs are constants in `overlay/overlay.js`
 for now and will likely become URL params later.
@@ -233,6 +250,9 @@ empty) is the same HUD, driven only by the stamp.
 `?smooth=off` paints the receiver's last fix (`raw_lat`/`raw_lon` on
 the same `/live` payload), with no ease, no dead-reckon, and no 3 m
 trail skip — that is the 10 Hz staircase the bridging exists to hide.
+Both views keep the same ten-minute trail window (age, not a point
+count), so a long light cannot spend the raw buffer scribbling a
+two-meter circle and eat the drive that led there.
 The default `lat`/`lon` is still the server's EMA, frozen in the crawl
 (below 2 km/h, where this receiver releases its parked pin and
 scribbles); that alpha is a constant in `gps_overlay.py`, not a URL param.
