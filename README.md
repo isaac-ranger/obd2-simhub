@@ -456,8 +456,9 @@ py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
 py probe\test_parse.py            py probe\test_learn_gears.py
 py probe\test_learn_throttle.py   py gps\test_gps_capture.py
 py gps\test_nmea.py               py gps\test_live_state.py
-py extractor\test_feed.py         py supervisor\test_supervisor.py
-py test_report.py                 py test_config.py
+py gps\test_gps_verify.py         py extractor\test_feed.py
+py supervisor\test_supervisor.py  py test_report.py
+py test_config.py
 ```
 
 The parser suite is 51 adversarial fixtures (single-frame, batched, ISO-TP

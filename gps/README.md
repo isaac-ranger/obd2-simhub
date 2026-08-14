@@ -1,12 +1,29 @@
-# gps/ — the XGPS160 leg, currently a listening post
+# gps/ — the XGPS160 leg: a listening post that finally heard something
 
 There is a listening post in this directory and it deliberately understands
 nothing. `gps_capture.py` writes down whatever the XGPS160 says, timestamped,
-and draws no conclusions. We have not seen one byte out of this device yet,
-and a parser written before a real capture comes back is a guess wearing
-code — so capture still doesn't parse. It moves in once the captures tell us
-what it has to parse: which sentences, at what real rate, and whether the
-advertised 10Hz is a promise to every sentence or only to position.
+and draws no conclusions. For weeks that restraint guarded an empty
+notebook; then four real captures came back — a driveway control and two
+drives — and the questions the timestamp column was built to answer got
+answered with numbers instead of a spec sheet:
+
+* The advertised 10 Hz belongs to **position only**. GGA and RMC arrive at
+  9.5–9.8 Hz; the satellite gossip (GSV/GSA) and the proprietary `$GPPWR`
+  ride along at 1–3 Hz.
+* Every one of 26,104 sentences carried a checksum, and zero failed. Over
+  Bluetooth SPP. The boat-autopilot people built well.
+* The device opens every connection with **three binary status packets**
+  (sync byte 0x55) glued to the front of the first NMEA sentences — see
+  the framer note below — and then never speaks binary again.
+* A parked XGPS160 pins its reported position: one unique coordinate
+  across an entire stationary capture. The wander everyone smooths
+  against is suppressed at zero speed by the receiver itself; it only
+  scribbles once you crawl.
+
+So the parser earned its way in: `nmea.py` (RMC + GGA, checksum-verified,
+resyncs past the binary preamble). And with real bytes on file, the health
+checker `gps_verify.py` below is how any future capture proves it is what
+it claims to be.
 
 This makes NMEA the third occupant of the trench coat: sentences designed
 for boat autopilots, riding alongside ELM327 AT commands, both older than
@@ -104,6 +121,16 @@ the millisecond and a tab. That first column is the entire point of the
 tool — it's what turns "supports ~10Hz" from a spec-sheet claim into a
 measurement.
 
+The file is pure printable ASCII, by construction: any byte the device
+says that isn't printable ASCII is spelled `\xNN` (and a literal
+backslash doubles), so the three binary packets the XGPS160 opens every
+connection with sit in the capture legible and byte-complete instead of
+either crashing the run (edition one), losing a byte to a replacement
+character (edition two), or turning the file into something grep refuses
+to search (the binary-sink road not taken). The spelling has an inverse,
+proven in the test suite, so a future binary-protocol parser inherits
+exact bytes from any capture made today.
+
 ## What to send back
 
 **Two captures, not one:**
@@ -123,6 +150,29 @@ comes out empty or strange, send it anyway: a weird capture is data, and
 for once it won't be user error — this README now has entire sections on
 which door was wrong and which operating system its own author thought
 you had.
+
+## Verifying a capture
+
+`gps_verify.py` is the health report for any capture (or overlay run log —
+same format): sentence census with measured rates, checksum coverage,
+binary-damage count, fix validity, speed, and the track's footprint in
+meters. Tell it what the capture claims to be and the exit code becomes a
+verdict:
+
+```
+py gps\gps_verify.py xgps160-capture.txt --expect stationary
+py gps\gps_verify.py runs\gps-last.txt --expect drive
+```
+
+A stationary capture must stay within GPS-wander range of its first fix
+and never claim real speed; a drive must actually go somewhere. The
+driveway control is the one that matters: a parser that reports motion
+in a parked capture has failed before it ever sees a drive.
+
+One deliberate manner: the report prints sizes, rates and counts — never
+a coordinate. Captures tend to begin at someone's front curb, and a
+health report should be safe to paste into an email without mailing
+anyone your house.
 
 ## Overlay (v1)
 
@@ -208,12 +258,17 @@ py gps\test_gps_capture.py        (Windows)
 python3 gps/test_gps_capture.py   (macOS / anywhere)
 py gps\test_nmea.py
 py gps\test_live_state.py
+py gps\test_gps_verify.py
 ```
 
 Canned byte streams only — no device, no COM port, no pyserial needed. The
 capture suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`,
 the deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
-plus the two-door dispatch: the name classifier, the flag each door
-actually returns, and the rule that an empty read on a timeout'd port is
-a quiet quarter-second, not a goodbye. The other two suites cover the
-overlay's RMC/GGA parser and the live-fix smoother.
+plus the byte-escape spelling and its inverse, walked over all 255 possible
+line bytes, and the two-door dispatch: the name classifier, the flag each
+door actually returns, and the rule that an empty read on a timeout'd port
+is a quiet quarter-second, not a goodbye. The nmea and live-state suites
+cover the overlay's RMC/GGA parser and the live-fix smoother; the verify
+suite proves the health checker's controls actually discriminate — its
+synthetic stationary capture must fail the drive claim and vice versa —
+and that its report keeps the no-coordinates promise.
