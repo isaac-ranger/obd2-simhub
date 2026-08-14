@@ -9,10 +9,13 @@ tool makes. What the sentences say is exactly the thing we don't know yet.
 import io
 import os
 import sys
+import tempfile
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gps_capture import LineFramer, run_capture, parse_args, is_com_port
+from gps_capture import (LineFramer, run_capture, parse_args, is_com_port,
+                         open_source)
 
 FAILED = []
 
@@ -196,6 +199,52 @@ ok("doors: /dev/cu.* and /dev/ttyUSB0 stay on the file side",
    "")
 ok("doors: COMMON is a word, not a port",
    not is_com_port("COMMON") and not is_com_port("COM"), "")
+ok("doors: the name ends at the digits — COM5x and COM5: are not ports",
+   not is_com_port("COM5x") and not is_com_port("COM5:"), "")
+
+# --- open_source: each door returns the flag it means ------------------------
+
+# The wiring, not the classifier: ship-qa proved by mutation that a COM door
+# returning empty_is_eof=True — every quiet quarter-second becoming EOF —
+# passed the whole suite. So each door is opened for real and its flag
+# asserted.
+
+with tempfile.NamedTemporaryFile(delete=False) as tf:
+    tf.write(b"$GPGGA,x*00\r\n")
+    tmp_name = tf.name
+src, flag = open_source(tmp_name)
+ok("open_source: a path opens the file door, where empty means hangup",
+   flag is True and src.read(4) == b"$GPG", f"flag={flag}")
+src.close()
+os.unlink(tmp_name)
+
+# The COM door is witnessed through a stub serial module planted in
+# sys.modules, so these assertions hold with or without pyserial installed:
+# the flag, the polite baud, and the load-bearing timeout.
+
+
+class _StubSerial:
+    def __init__(self, port, baudrate, timeout=None):
+        self.opened = (port, baudrate, timeout)
+
+
+_stub = types.ModuleType("serial")
+_stub.Serial = _StubSerial
+_stub.SerialException = type("SerialException", (Exception,), {})
+sys.modules["serial"] = _stub
+
+src, flag = open_source("COM7")
+ok("open_source: a COM name opens the serial door, where empty means quiet",
+   flag is False and isinstance(src, _StubSerial), f"flag={flag} src={src!r}")
+ok("open_source: baud 115200 and the load-bearing 0.25s timeout are passed",
+   src.opened == ("COM7", 115200, 0.25), f"{src.opened}")
+
+try:
+    open_source("/no/such/port/anywhere")
+    died = False
+except SystemExit:
+    died = True
+ok("open_source: a bad path dies with a message, not a traceback", died, "")
 
 # --- parse_args: the promised defaults ---------------------------------------
 

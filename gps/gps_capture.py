@@ -13,8 +13,9 @@ there is to parse.
 
 One tool, two doors — and unlike the last pair of doors this file wrote
 about, both of these work. A port named like COMn goes through pyserial;
-anything else is opened as a plain file. Output is identical either way,
-so nothing downstream will ever know which OS the bytes came in through.
+anything else is opened as a plain file. The output format is the same
+either way — seconds, a tab, the sentence — so the future parser never
+has to care which door was used.
 
 Usage (Windows — the side of the Bootcamp fence the car actually boots):
 
@@ -148,7 +149,12 @@ def open_source(port):
             sys.exit("could not open %s: %s\n"
                      "(right COM number? the OUTGOING one? "
                      "gps/README.md has the tour)" % (port, e))
-    return open(port, "rb", buffering=0), True
+    try:
+        return open(port, "rb", buffering=0), True
+    except OSError as e:
+        sys.exit("could not open %s: %s\n"
+                 "(on macOS: ls /dev/cu.* and take the cu door — "
+                 "gps/README.md)" % (port, e))
 
 
 def parse_args(argv, platform=sys.platform):

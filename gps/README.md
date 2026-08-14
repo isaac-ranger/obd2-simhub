@@ -26,8 +26,8 @@ reality insisted.
 
 The tool itself no longer cares. One tool, two doors: a port named `COMn`
 goes through pyserial, a `/dev/cu.*` path is a plain file open, and the
-output is identical either way, so the future parser will never learn
-which OS its bytes came in through.
+output format is the same either way — seconds, a tab, the sentence — so
+the future parser never has to care which door was used.
 
 ## Windows — the real deployment
 
@@ -92,6 +92,14 @@ anything sits blocked in the first read — past any deadline — until you
 Ctrl-C it. A capture that refuses to end on its own is this lane's version
 of the empty file: the device paired, but it isn't talking.
 
+## The output
+
+Either door, the capture lands in `xgps160-capture.txt` in the directory
+you ran from: one sentence per line, prefixed with seconds-since-start to
+the millisecond and a tab. That first column is the entire point of the
+tool — it's what turns "supports ~10Hz" from a spec-sheet claim into a
+measurement.
+
 ## What to send back
 
 **Two captures, not one:**
@@ -122,5 +130,6 @@ python3 gps/test_gps_capture.py   (macOS / anywhere)
 Canned byte streams only — no device, no COM port, no pyserial needed. The
 suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`, the
 deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
-plus the two-door dispatch, including the rule that an empty read on a
-timeout'd port is a quiet quarter-second and not a goodbye.
+plus the two-door dispatch: the name classifier, the flag each door
+actually returns, and the rule that an empty read on a timeout'd port is
+a quiet quarter-second, not a goodbye.
