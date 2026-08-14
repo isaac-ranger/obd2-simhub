@@ -13,7 +13,57 @@ for boat autopilots, riding alongside ELM327 AT commands, both older than
 the laptop carrying them, driving a 2025 Porsche dashboard. The rig remains
 at peace with itself.
 
-## Finding the port (macOS)
+## A correction, from the author, about the author
+
+The previous edition of this README described the wrong operating system
+with perfect fidelity. The MacBook in the car is a Bootcamp machine and it
+boots **Windows 10** — it has to; SimHub is Windows-only, a fact this
+repo's own correspondence stated plainly before the README forgot it one
+email later. Author error, not user error. The macOS material below
+survives — the machine can boot either side of the fence, which is why it
+was chosen — but it is now the secondary lane, and Windows leads, the way
+reality insisted.
+
+The tool itself no longer cares. One tool, two doors: a port named `COMn`
+goes through pyserial, a `/dev/cu.*` path is a plain file open, and the
+output is identical either way, so the future parser will never learn
+which OS its bytes came in through.
+
+## Windows — the real deployment
+
+Install the one dependency, if the MZX+ work didn't already:
+
+```
+py -m pip install pyserial
+```
+
+Find the port: **Bluetooth settings -> More Bluetooth options -> COM Ports
+tab**. The XGPS160 pairs over SPP and usually claims TWO ports; use the
+**outgoing** one — that's the line the GPS actually answers. Device
+Manager -> Ports (COM & LPT) shows the same list, in a section still named
+half for printer plugs.
+
+Then:
+
+```
+py gps\gps_capture.py COM5 60
+```
+
+Second argument is seconds (default 60). Baud never stopped being
+decoration — a Bluetooth virtual port ignores it — but pyserial insists on
+being told a number, so the tool says 115200 on your behalf, which is a
+polite one.
+
+The 0.25s read timeout is load-bearing, not decoration: it keeps Ctrl-C
+responsive on Windows, and it means a port that opens but never speaks
+produces an **empty capture file at the deadline** instead of a hang. An
+empty file is itself a finding, and its usual meaning is "wrong half of
+the COM pair" — go back to the COM Ports tab and try the other number.
+
+Ctrl-C ends a capture early on either platform and keeps everything framed
+so far; a short capture is still a good capture.
+
+## macOS — the secondary lane
 
 Pair the XGPS160 in Bluetooth settings, then:
 
@@ -29,28 +79,18 @@ will never answer — so opening it means sitting at a frozen cursor slowly
 concluding the receiver is dead. It isn't. It's the door. The cu ("call-up")
 door skips the question and just talks.
 
-Baud never comes up: a Bluetooth serial port is a virtual tty and ignores
-it completely. This is the only mercy this stack has shown us so far.
-
-## Running a capture
-
 ```
 python3 gps/gps_capture.py /dev/cu.XGPS160-XXXXXX 60
 ```
 
-No pyserial, no dependencies — plain python3 as it ships on macOS. Second
-argument is seconds (default 60). Ctrl-C ends a capture early and keeps
-everything framed so far; a short capture is still a good capture.
+No pyserial on this side — a paired Bluetooth serial port on macOS is a
+virtual tty, and a plain `open()` is the entire I/O stack.
 
-One honesty note: the deadline only ticks between reads, so a port that
-opens but never says anything sits blocked in the first read — past any
-deadline — until you Ctrl-C it. A capture that refuses to end on its own is
-therefore itself a finding: the device paired, but it isn't talking.
-
-Output lands in `xgps160-capture.txt` in the directory you ran from: one
-sentence per line, each prefixed with seconds-since-start to the
-millisecond and a tab. That first column is the entire point of the tool —
-it's what turns "supports ~10Hz" from a spec-sheet claim into a measurement.
+One honesty note, and it differs by door: on a plain file open the
+deadline only ticks between reads, so a port that opens but never says
+anything sits blocked in the first read — past any deadline — until you
+Ctrl-C it. A capture that refuses to end on its own is this lane's version
+of the empty file: the device paired, but it isn't talking.
 
 ## What to send back
 
@@ -68,15 +108,19 @@ it's what turns "supports ~10Hz" from a spec-sheet claim into a measurement.
 Send back both `xgps160-capture.txt` files (rename them so they don't
 clobber each other — `parked.txt` and `moving.txt` works). If a capture
 comes out empty or strange, send it anyway: a weird capture is data, and
-for once it won't be user error — there's an entire section above about
-which door was the wrong one.
+for once it won't be user error — this README now has entire sections on
+which door was wrong and which operating system its own author thought
+you had.
 
 ## Tests
 
 ```
-python3 gps/test_gps_capture.py
+py gps\test_gps_capture.py        (Windows)
+python3 gps/test_gps_capture.py   (macOS / anywhere)
 ```
 
-Canned byte streams only — no device needed. The suite defends the framing
-(chunks split mid-sentence, `\r\n` vs `\n`, the deadline, EOF, Ctrl-C),
-which is the only promise the capture tool makes.
+Canned byte streams only — no device, no COM port, no pyserial needed. The
+suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`, the
+deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
+plus the two-door dispatch, including the rule that an empty read on a
+timeout'd port is a quiet quarter-second and not a goodbye.

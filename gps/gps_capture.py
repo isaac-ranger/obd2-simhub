@@ -11,30 +11,55 @@ sentences before a real capture comes back is a guess wearing code. The
 parser earns its place in this directory only after this tool tells us what
 there is to parse.
 
-Usage (macOS — the side of the Bootcamp fence where the GPS pairs):
+One tool, two doors — and unlike the last pair of doors this file wrote
+about, both of these work. A port named like COMn goes through pyserial;
+anything else is opened as a plain file. Output is identical either way,
+so nothing downstream will ever know which OS the bytes came in through.
+
+Usage (Windows — the side of the Bootcamp fence the car actually boots):
+
+  py -m pip install pyserial
+  py gps\\gps_capture.py COM5 60
+
+The COM number lives in Bluetooth settings -> More Bluetooth options ->
+COM Ports tab; the XGPS160 usually claims TWO ports, and the OUTGOING one
+is the one that talks. Device Manager -> Ports (COM & LPT) shows the same
+list, in the section named for the printer plug. gps/README.md has the
+full tour.
+
+Usage (macOS — the fence's other side, kept because the machine can boot it):
 
   ls /dev/cu.*
   python3 gps/gps_capture.py /dev/cu.XGPS160-XXXXXX 60
 
-Use /dev/cu.*, NEVER /dev/tty.* — same device, two doors. The tty door
-blocks waiting on carrier detect, and you will sit staring at a cursor
-concluding the GPS is dead. It isn't. It's the door. (The gory details are
-in gps/README.md, written down so nobody rediscovers this in a parking lot.)
-
-No pyserial, no dependencies, nothing to install: a paired Bluetooth serial
-port on macOS is a virtual tty, baud is meaningless, and a plain binary
-open() is the entire I/O stack. Ctrl-C whenever — output is flushed as it
-arrives, so a short capture is still a good capture.
+Use /dev/cu.*, NEVER /dev/tty.* — same device, two doors, and the tty door
+blocks forever on a carrier-detect question the GPS will never answer. (The
+gory details are in gps/README.md, written down so nobody rediscovers this
+in a parking lot.)
 
 The first column is seconds since start, to three decimals. That column is
 the entire reason this file exists: it will tell us whether the advertised
 10Hz applies to every sentence or only to position, and no spec sheet will.
 """
 
+import re
 import sys
 import time
 
 OUT_NAME = "xgps160-capture.txt"
+
+# COM5, com12, or the \\.\COM10 spelling that Windows tooling hands out.
+_COM_NAME = re.compile(r"^(\\\\\.\\)?COM\d+$", re.IGNORECASE)
+
+
+def is_com_port(port):
+    """True when the port NAME says Windows serial.
+
+    Deliberately a test of the name, not of sys.platform: the car's MacBook
+    boots either OS, and what the user typed is the only statement of which
+    world they're standing in right now.
+    """
+    return _COM_NAME.match(port) is not None
 
 
 class LineFramer:
@@ -66,15 +91,19 @@ class LineFramer:
         return lines
 
 
-def run_capture(src, out, secs, clock=time.time):
+def run_capture(src, out, secs, clock=time.time, empty_is_eof=True):
     """Pump src (binary file-like) into out (text file-like) for secs seconds.
 
     Returns the number of lines written. Each line is '%.3f\\t%s\\n' —
     seconds since start, a tab, the sentence. Flushes after every drain so
-    an interrupted capture keeps everything framed so far. Stops early on
-    EOF (an empty read from a blocking fd means the device hung up — looping
-    on it would spin a CPU core in a parking lot) and on Ctrl-C, which is a
+    an interrupted capture keeps everything framed so far. Ctrl-C is a
     supported way to end a capture, not an error.
+
+    empty_is_eof is the one honest difference between the two doors. On a
+    blocking fd an empty read means the device hung up, and looping on it
+    would spin a CPU core in a parking lot — so we break. On a timeout'd
+    serial port an empty read means a quiet quarter-second, which is not a
+    goodbye — so we keep listening until the deadline.
     """
     framer = LineFramer()
     t0 = clock()
@@ -83,7 +112,9 @@ def run_capture(src, out, secs, clock=time.time):
         while clock() - t0 < secs:
             chunk = src.read(256)
             if not chunk:
-                break
+                if empty_is_eof:
+                    break
+                continue
             for line in framer.feed(chunk):
                 out.write("%.3f\t%s\n" % (clock() - t0, line))
                 n += 1
@@ -93,17 +124,55 @@ def run_capture(src, out, secs, clock=time.time):
     return n
 
 
-def parse_args(argv):
-    """(port, secs) from argv, with the defaults the email promised."""
-    port = argv[0] if len(argv) > 0 else "/dev/cu.XGPS160-XXXXXX"
+def open_source(port):
+    """Open the right door for the port name; returns (source, empty_is_eof).
+
+    A COM name goes through pyserial. Baud is still decoration on a
+    Bluetooth virtual port, but pyserial insists on being told a number, so
+    it gets a polite one. The timeout is load-bearing, not decoration: it
+    is what keeps Ctrl-C answerable on Windows and turns a dead port into
+    an empty capture instead of a hung one. The import lives down here so
+    the macOS lane keeps its nothing-to-install promise.
+
+    Anything else is a plain blocking open() — on macOS a paired Bluetooth
+    serial port is a virtual tty, and that call is the entire I/O stack.
+    """
+    if is_com_port(port):
+        try:
+            import serial
+        except ImportError:
+            sys.exit("COM ports need pyserial: py -m pip install pyserial")
+        try:
+            return serial.Serial(port, 115200, timeout=0.25), False
+        except serial.SerialException as e:
+            sys.exit("could not open %s: %s\n"
+                     "(right COM number? the OUTGOING one? "
+                     "gps/README.md has the tour)" % (port, e))
+    return open(port, "rb", buffering=0), True
+
+
+def parse_args(argv, platform=sys.platform):
+    """(port, secs) from argv, defaulting to the door the platform suggests.
+
+    Only the DEFAULT consults the platform; a port you name is taken at
+    face value on any OS. COM5 is the default the email promised; the cu
+    hint is a pattern to fill in, not a port that exists.
+    """
+    if len(argv) > 0:
+        port = argv[0]
+    elif platform.startswith("win"):
+        port = "COM5"
+    else:
+        port = "/dev/cu.XGPS160-XXXXXX"
     secs = float(argv[1]) if len(argv) > 1 else 60.0
     return port, secs
 
 
 def main(argv=None):
     port, secs = parse_args(sys.argv[1:] if argv is None else argv)
-    with open(port, "rb", buffering=0) as f, open(OUT_NAME, "w") as out:
-        n = run_capture(f, out, secs)
+    src, empty_is_eof = open_source(port)
+    with src, open(OUT_NAME, "w") as out:
+        n = run_capture(src, out, secs, empty_is_eof=empty_is_eof)
     print("wrote %s (%d lines)" % (OUT_NAME, n))
     return 0
 

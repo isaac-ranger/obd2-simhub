@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gps_capture import LineFramer, run_capture, parse_args
+from gps_capture import LineFramer, run_capture, parse_args, is_com_port
 
 FAILED = []
 
@@ -71,11 +71,11 @@ class Out(io.StringIO):
         super().flush()
 
 
-def capture(chunks, secs=60.0, step=0.1):
+def capture(chunks, secs=60.0, step=0.1, empty_is_eof=True):
     clock = FakeClock()
     out = Out()
     src = Script(chunks, clock=clock, step=step)
-    n = run_capture(src, out, secs, clock=clock)
+    n = run_capture(src, out, secs, clock=clock, empty_is_eof=empty_is_eof)
     return n, out, src
 
 
@@ -165,15 +165,58 @@ n, out, _ = capture([b"$GPGGA,half", KeyboardInterrupt])
 ok("capture: Ctrl-C mid-sentence drops only the unterminated tail",
    n == 0 and out.getvalue() == "", f"out={out.getvalue()!r}")
 
+# --- the Windows door: an empty read is a timeout, not a goodbye -------------
+
+# On a timeout'd serial port, b"" means "quiet quarter-second". Data arriving
+# AFTER a quiet spell must still land — a loop that treats the first empty
+# read as EOF drops everything past the gap and n==1 gives it away.
+n, out, src = capture([b"$GPGGA,a*01\r\n", b"", b"", b"$GPGGA,b*02\r\n"],
+                      secs=2.0, empty_is_eof=False)
+ok("capture: a quiet spell on a timeout'd port is not EOF",
+   n == 2 and lines_of(out)[1].endswith("$GPGGA,b*02"),
+   f"n={n} out={out.getvalue()!r}")
+
+# A port that never speaks again is ended by the DEADLINE on this door. The
+# read count is again the discriminator: breaking on the first empty read
+# also returns n==1, but it stops at 2 reads — listening to the deadline
+# takes ten.
+n, out, src = capture([b"$GPGGA,only*00\r\n"], secs=1.0, step=0.1,
+                      empty_is_eof=False)
+ok("capture: the deadline ends a silent timeout'd port",
+   n == 1 and src.reads >= 5, f"n={n} reads={src.reads}")
+
+# --- is_com_port: which door does a name open? -------------------------------
+
+ok("doors: COM5 and com12 read as Windows serial",
+   is_com_port("COM5") and is_com_port("com12"), "")
+ok("doors: the \\\\.\\COM10 spelling counts too",
+   is_com_port(r"\\.\COM10"), "")
+ok("doors: /dev/cu.* and /dev/ttyUSB0 stay on the file side",
+   not is_com_port("/dev/cu.XGPS160-A1B2C3") and not is_com_port("/dev/ttyUSB0"),
+   "")
+ok("doors: COMMON is a word, not a port",
+   not is_com_port("COMMON") and not is_com_port("COM"), "")
+
 # --- parse_args: the promised defaults ---------------------------------------
 
-port, secs = parse_args([])
-ok("args: no arguments means the cu-port hint and 60 seconds",
+# Platform is injected so this suite gives the same verdicts on the car's
+# Windows side as it does here: each default is asserted from both worlds.
+
+port, secs = parse_args([], platform="darwin")
+ok("args: no arguments on macOS means the cu-port hint and 60 seconds",
    port == "/dev/cu.XGPS160-XXXXXX" and secs == 60.0, f"{port} {secs}")
+
+port, secs = parse_args([], platform="win32")
+ok("args: no arguments on Windows means COM5 — the default the email promised",
+   port == "COM5" and secs == 60.0, f"{port} {secs}")
 
 port, secs = parse_args(["/dev/cu.XGPS160-A1B2C3", "15"])
 ok("args: port and seconds both land, seconds as float",
    port == "/dev/cu.XGPS160-A1B2C3" and secs == 15.0, f"{port} {secs}")
+
+port, secs = parse_args(["/dev/cu.XGPS160-A1B2C3"], platform="win32")
+ok("args: a named port is taken at face value, whatever the platform",
+   port == "/dev/cu.XGPS160-A1B2C3", f"{port}")
 
 # ---------------------------------------------------------------------------------
 
