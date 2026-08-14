@@ -1,5 +1,5 @@
 /* Ego-centered GPS trail. Defaults are magic numbers for v1; some already
-   accept URL params (?meters=, ?metersMax=, ?up=, ?smooth=, ?bg=, ?hud=).
+   accept URL params (?meters=, ?metersMax=, ?up=, ?smooth=, ?bg=, ?hud=, ?trailPause=).
 
    ?up=north   (default) — map North-up; arrow rotates with heading
    ?up=heading           — arrow fixed pointing up; map rotates with heading
@@ -11,6 +11,8 @@
    ?bg=grey              — solid bench so the dark trail edge is visible
    ?bg=dark              — original near-black stage
    ?hud=on               — show the status line (hidden by default)
+   ?trailPause=off       — age the trail by wall clock even while parked
+                           (default pauses the ten-minute window when stopped)
 
    Rates: the receiver speaks at ~10 Hz and the poll matches it, but the
    draw loop runs on requestAnimationFrame capped near 30 Hz. Repainting
@@ -49,6 +51,12 @@
   // the raw buffer on a two-meter circle and ate the approach.
   var TRAIL_MIN_M = 3;
   var TRAIL_MAX_MS = 10 * 60 * 1000;
+  // Trail clock pauses below PAUSE, resumes above RESUME, so a 2 km/h
+  // twitch does not restart the hourglass. Sitting does not consume
+  // the ten-minute window; skipping expire without freezing now would
+  // wipe the lap on throttle-up.
+  var TRAIL_PAUSE_BELOW_KMH = 2.0;
+  var TRAIL_RESUME_ABOVE_KMH = 3.0;
   var ARROW_PX = 28;
   var LIVE_URL = "/live";
 
@@ -92,6 +100,7 @@
   document.documentElement.style.background = bgColor;
   document.body.style.background = bgColor;
   var showHud = (params.get("hud") || "off").toLowerCase() === "on";
+  var trailPause = (params.get("trailPause") || "on").toLowerCase() !== "off";
 
   var canvas = document.getElementById("map");
   var ctx = canvas.getContext("2d");
@@ -99,7 +108,10 @@
   var statusEl = document.getElementById("status");
   if (hudEl && !showHud) hudEl.style.display = "none";
 
-  var trail = [];      // [{lat, lon, tMs}, ...] absolute, from real fixes only
+  var trail = [];      // [{lat, lon, tMs}, ...] tMs is trail-clock, not wall
+  var trailClockMs = 0;
+  var trailClockWallMs = 0;
+  var trailClockPaused = true;
   var fix = null;      // newest server snapshot
   var fixAtMs = 0;     // performance.now() when a NEW fix landed
   var fixT = null;     // server timestamp of that fix, to spot repeats
@@ -172,31 +184,47 @@
     return { lat: f.lat, lon: f.lon };
   }
 
-  function expireTrail(nowMs) {
-    var cutoff = nowMs - TRAIL_MAX_MS;
+  function advanceTrailClock(nowMs, speed) {
+    if (trailPause) {
+      if (trailClockPaused) {
+        if (speed >= TRAIL_RESUME_ABOVE_KMH) trailClockPaused = false;
+      } else if (speed < TRAIL_PAUSE_BELOW_KMH) {
+        trailClockPaused = true;
+      }
+    } else {
+      trailClockPaused = false;
+    }
+    if (!trailClockPaused && trailClockWallMs > 0) {
+      trailClockMs += nowMs - trailClockWallMs;
+    }
+    trailClockWallMs = nowMs;
+  }
+
+  function expireTrail() {
+    var cutoff = trailClockMs - TRAIL_MAX_MS;
     var i = 0;
     while (i < trail.length && trail[i].tMs < cutoff) i++;
     if (i > 0) trail.splice(0, i);
   }
 
-  function maybeAppendTrail(lat, lon) {
+  function maybeAppendTrail(lat, lon, speed) {
     var nowMs = window.performance.now();
-    var p = { lat: lat, lon: lon, tMs: nowMs };
+    advanceTrailClock(nowMs, speed || 0);
+    var p = { lat: lat, lon: lon, tMs: trailClockMs };
     if (trail.length === 0) {
       trail.push(p);
       return;
     }
-    // The 3 m skip is a view opinion: idle wander should not scribble
-    // the default trail. smooth=off keeps every sample so the A/B is
-    // actually the receiver, not the receiver minus close points.
-    // Expire even when we skip — a frozen default view still has to
-    // drop the same old minutes the raw view does.
-    if (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M) {
-      expireTrail(nowMs);
+    // Do not append while the clock is paused (even smooth=off): a
+    // 10 Hz scribble at the grid would grow without bound. The 3 m
+    // skip still applies while moving slowly with the clock running.
+    if (trailClockPaused ||
+        (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M)) {
+      expireTrail();
       return;
     }
     trail.push(p);
-    expireTrail(nowMs);
+    expireTrail();
   }
 
   /* Where the camera should be right now, given the newest fix and how long
@@ -411,7 +439,7 @@
           fixT = data.t;
           fixAtMs = window.performance.now();
           var pos = displayPos(data);
-          maybeAppendTrail(pos.lat, pos.lon);
+          maybeAppendTrail(pos.lat, pos.lon, data.speed_kmh);
         }
         fix = data;
       })

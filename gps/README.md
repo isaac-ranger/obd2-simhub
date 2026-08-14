@@ -38,23 +38,7 @@ A second tool, `gps_overlay.py`, is a later and separate process: a browser
 map fed from a live port or a replayed capture. It is not folded into the
 listening post or into `obd_feed`. Capture stays dumb on purpose.
 
-## A correction, from the author, about the author
-
-The previous edition of this README described the wrong operating system
-with perfect fidelity. The MacBook in the car is a Bootcamp machine and it
-boots **Windows 10** — it has to; SimHub is Windows-only, a fact this
-repo's own correspondence stated plainly before the README forgot it one
-email later. Author error, not user error. The macOS material below
-survives — the machine can boot either side of the fence, which is why it
-was chosen — but it is now the secondary lane, and Windows leads, the way
-reality insisted.
-
-The tool itself no longer cares. One tool, two doors: a port named `COMn`
-goes through pyserial, a `/dev/cu.*` path is a plain file open, and the
-output format is the same either way — seconds, a tab, the sentence — so
-the future parser never has to care which door was used.
-
-## Windows — the real deployment
+## Capture
 
 Install the one dependency, if the MZX+ work didn't already:
 
@@ -85,41 +69,12 @@ produces an **empty capture file at the deadline** instead of a hang. An
 empty file is itself a finding, and its usual meaning is "wrong half of
 the COM pair" — go back to the COM Ports tab and try the other number.
 
-Ctrl-C ends a capture early on either platform and keeps everything framed
-so far; a short capture is still a good capture.
-
-## macOS — the secondary lane
-
-Pair the XGPS160 in Bluetooth settings, then:
-
-```
-ls /dev/cu.*
-```
-
-You're looking for something like `/dev/cu.XGPS160-A1B2C3`.
-
-**Use `/dev/cu.*`, never `/dev/tty.*`.** Same device, two doors. The tty
-door blocks waiting on carrier detect — a modem-etiquette question the GPS
-will never answer — so opening it means sitting at a frozen cursor slowly
-concluding the receiver is dead. It isn't. It's the door. The cu ("call-up")
-door skips the question and just talks.
-
-```
-python3 gps/gps_capture.py /dev/cu.XGPS160-XXXXXX 60
-```
-
-No pyserial on this side — a paired Bluetooth serial port on macOS is a
-virtual tty, and a plain `open()` is the entire I/O stack.
-
-One honesty note, and it differs by door: on a plain file open the
-deadline only ticks between reads, so a port that opens but never says
-anything sits blocked in the first read — past any deadline — until you
-Ctrl-C it. A capture that refuses to end on its own is this lane's version
-of the empty file: the device paired, but it isn't talking.
+Ctrl-C ends a capture early and keeps everything framed so far; a short
+capture is still a good capture.
 
 ## The output
 
-Either door, the capture lands in `xgps160-capture.txt` in the directory
+The capture lands in `xgps160-capture.txt` in the directory
 you ran from: one sentence per line, prefixed with seconds-since-start to
 the millisecond and a tab. That first column is the entire point of the
 tool — it's what turns "supports ~10Hz" from a spec-sheet claim into a
@@ -154,9 +109,8 @@ exact bytes from any capture made today.
 Send back both `xgps160-capture.txt` files (rename them so they don't
 clobber each other — `parked.txt` and `moving.txt` works). If a capture
 comes out empty or strange, send it anyway: a weird capture is data, and
-for once it won't be user error — this README now has entire sections on
-which door was wrong and which operating system its own author thought
-you had.
+for once it won't be user error — the usual empty file is the incoming
+half of the SPP pair.
 
 ## Verifying a capture
 
@@ -190,8 +144,7 @@ toward a cap to keep the trail on screen. Browser owns the trail
 (refresh clears it). Separate process from the OBD feed and from the
 capture tool.
 
-The live door is the same two-door open the capture tool uses — a `COMn`
-name goes through pyserial, a `/dev/cu.*` path is a plain file open. Same
+The live door is the same COM open the capture tool uses. Same
 outgoing-port rule as above.
 
 ```
@@ -202,38 +155,32 @@ py gps\gps_overlay.py --replay runs\gps-last.txt
 
 `--list-ports` names the Bluetooth peer when Windows will tell us, so the
 outgoing XGPS is visible next to the incoming listen-only half of the pair.
-Open in Chrome or an OBS browser source:
+Open in Chrome or an OBS browser source. Production is the bare URL;
+add knobs for a bench or a different view:
 
 ```
-http://127.0.0.1:8765/
-http://127.0.0.1:8765/?bg=grey
-http://127.0.0.1:8765/?hud=on
-http://127.0.0.1:8765/?meters=200
-http://127.0.0.1:8765/?meters=200&metersMax=1000
-http://127.0.0.1:8765/?meters=200&metersMax=200
-http://127.0.0.1:8765/?up=heading
-http://127.0.0.1:8765/?meters=200&up=heading
-http://127.0.0.1:8765/?smooth=off
+http://127.0.0.1:8765/                 (OBS: transparent, no HUD)
+http://127.0.0.1:8765/?bg=grey&hud=on  (browser bench)
 ```
 
-OBS sets pixel Width × Height; the page fills the window. The page is
-transparent by default so an OBS browser source composites the trail
-over video; `?bg=grey` is the solid bench that makes the dark trail
-edge visible in Chrome, and `?bg=dark` is the original near-black
-stage. The status line (coords, speed, scale) is hidden until
-`?hud=on` — OBS does not need it, Chrome debugging does. World scale is
-`?meters=` (floor, default 200) and `?metersMax=` (cap, default 1000).
-While the trail's farthest point from the car fits in the floor, the
-view stays there. When it would run off the short edge, the scale eases
-out toward the cap — world radius, so `?up=heading` does not pump the
-zoom as you turn — and eases back in more slowly when the trail fits
-again. Set `?metersMax=` equal to `?meters=` to lock the old fixed
-scale. A ten-minute freeway trail will hit the cap; that is the point
-of the cap. Use `?meters=50` if you want the old walking yard for
-paddock testing. Orientation is `?up=north` (default — map
-North-up, arrow rotates) or `?up=heading` (arrow fixed pointing up, map
-rotates with course). Other knobs are constants in `overlay/overlay.js`
-for now and will likely become URL params later.
+```
+?meters=200          floor: metres across the short edge
+?metersMax=1000      zoom-out cap; same as ?meters= locks the scale
+?up=heading          arrow fixed up, map rotates (default north-up)
+?bg=grey             solid bench (default transparent for OBS)
+?bg=dark             original near-black stage
+?hud=on              status line (hidden)
+?trailPause=off      age by wall clock while parked (default pauses)
+?smooth=off          raw fixes, no bridging (debug)
+```
+
+OBS sets pixel Width × Height; the page fills the window. Scale stays
+at the floor while the trail fits, eases out toward the cap when the
+farthest point from the car would run off the short edge (world
+radius, so heading-up does not pump the zoom), and eases back in more
+slowly when it fits again. A ten-minute freeway trail will hit the
+cap; that is the point of the cap. `?meters=50` is the old walking
+yard for paddock testing.
 
 The page polls `/live` at 10 Hz to match the receiver, but paints from
 requestAnimationFrame at about 30 Hz. The extra frames are not repeats:
@@ -251,8 +198,11 @@ empty) is the same HUD, driven only by the stamp.
 the same `/live` payload), with no ease, no dead-reckon, and no 3 m
 trail skip — that is the 10 Hz staircase the bridging exists to hide.
 Both views keep the same ten-minute trail window (age, not a point
-count), so a long light cannot spend the raw buffer scribbling a
-two-meter circle and eat the drive that led there.
+count). The clock for that window pauses below 2 km/h and resumes
+above 3, so a driveway wait or pre-grid does not peel the lap you
+just drew; `?trailPause=off` ages by wall clock even while parked.
+A long light still cannot spend a point budget on a two-meter circle
+— there is no point budget.
 The default `lat`/`lon` is still the server's EMA, frozen in the crawl
 (below 2 km/h, where this receiver releases its parked pin and
 scribbles); that alpha is a constant in `gps_overlay.py`, not a URL param.
@@ -291,8 +241,7 @@ The GPS is not the OBDLink. Put the XGPS port in `gps_overlay`, not in
 ## Tests
 
 ```
-py gps\test_gps_capture.py        (Windows)
-python3 gps/test_gps_capture.py   (macOS / anywhere)
+py gps\test_gps_capture.py
 py gps\test_nmea.py
 py gps\test_live_state.py
 py gps\test_gps_verify.py
@@ -302,9 +251,9 @@ Canned byte streams only — no device, no COM port, no pyserial needed. The
 capture suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`,
 the deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
 plus the byte-escape spelling and its inverse, walked over all 255 possible
-line bytes, and the two-door dispatch: the name classifier, the flag each
-door actually returns, and the rule that an empty read on a timeout'd port
-is a quiet quarter-second, not a goodbye. The nmea and live-state suites
+line bytes, and the COM door: the name classifier, the flag it actually
+returns, and the rule that an empty read on a timeout'd port is a quiet
+quarter-second, not a goodbye. The nmea and live-state suites
 cover the overlay's RMC/GGA parser, the live-fix smoother, and the
 dropout door: a raised read marks the last pose lost, an empty timeout
 does not. The verify suite proves the health checker's controls
