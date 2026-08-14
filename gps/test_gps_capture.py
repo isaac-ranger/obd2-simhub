@@ -122,8 +122,47 @@ ok("framer: an unterminated tail stays buffered, not emitted",
 
 f = LineFramer()
 got = f.feed(b"$PXGPS,\xff\xfebinary?\r\n")
-ok("framer: an undecodable byte becomes U+FFFD, not a crash",
-   got == ["$PXGPS,��binary?"], f"{got!r}")
+ok("framer: a non-ASCII byte is spelled \\xNN, kept, not eaten",
+   got == ["$PXGPS,\\xff\\xfebinary?"], f"{got!r}")
+
+# The XGPS160's actual connection rite: binary status packet, then NMEA,
+# one line. Every byte must be visible in the output, none replaced.
+f = LineFramer()
+got = f.feed(b"U\x04\x008\x00\x00\xef\x00$GPGSA,A,1*30\r\n")
+ok("framer: the 0x55 packet's bytes are all visible, high byte included",
+   got == ["U\\x04\\x008\\x00\\x00\\xef\\x00$GPGSA,A,1*30"], f"{got!r}")
+
+f = LineFramer()
+got = f.feed(b"a\\b\r\n")
+ok("framer: a literal backslash doubles, so the spelling stays unambiguous",
+   got == ["a\\\\b"], f"{got!r}")
+
+
+def unescape(text):
+    """Inverse of visible_bytes — lives here as the proof it has one."""
+    out = bytearray()
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            if text[i + 1] == "\\":
+                out.append(0x5C)
+                i += 2
+            else:  # \xNN
+                out.append(int(text[i + 2:i + 4], 16))
+                i += 4
+        else:
+            out.append(ord(text[i]))
+            i += 1
+    return bytes(out)
+
+
+# Every byte the device could say, minus the two the framer owns (\n splits,
+# a trailing \r is framing); ends printable so no trailing \r is stripped.
+sweep = bytes(b for b in range(256) if b != 0x0A) + b"!"
+f = LineFramer()
+got = f.feed(sweep + b"\n")
+ok("framer: all 255 line bytes round-trip exactly through the escape",
+   len(got) == 1 and unescape(got[0]) == sweep, f"{got!r}")
 
 # --- run_capture: the loop around the framer ---------------------------------
 
@@ -246,11 +285,11 @@ except SystemExit:
     died = True
 ok("open_source: a bad path dies with a message, not a traceback", died, "")
 
-# --- open_sink: U+FFFD has to survive the file, not just the framer ----------
+# --- open_sink: the framer's spelling has to survive a real file -------------
 
-# StringIO would hide this: the crash is the locale encoding on a real file.
-# The encoding name is the discriminator; writing one replacement character
-# is the tripwire the Windows parking-lot run actually hit.
+# StringIO would hide this: the crash was the locale encoding on a real file.
+# The encoding name is the discriminator \u2014 the Windows parking-lot run died
+# when cp1252 refused what the framer of that era produced.
 fd, sink_name = tempfile.mkstemp(suffix=".txt")
 os.close(fd)
 try:
@@ -262,10 +301,11 @@ try:
         body = f.read()
 finally:
     os.unlink(sink_name)
-ok("open_sink: the file is UTF-8, so U+FFFD is a legal character",
+ok("open_sink: the encoding is pinned utf-8, not the locale's choice",
    encoding.lower().replace("-", "") == "utf8", f"{encoding!r}")
-ok("open_sink: a binary preamble writes as U+FFFD instead of crashing",
-   n == 1 and "\ufffd" in body, f"n={n} body={body!r}")
+ok("open_sink: a binary preamble lands as visible escapes, byte-complete",
+   n == 1 and "\\xff\\xfe" in body and "\ufffd" not in body,
+   f"n={n} body={body!r}")
 
 # --- parse_args: the promised defaults ---------------------------------------
 

@@ -63,15 +63,42 @@ def is_com_port(port):
     return _COM_NAME.match(port) is not None
 
 
+def visible_bytes(raw):
+    """One line of device bytes -> printable ASCII, losslessly.
+
+    Printable ASCII passes through as itself; every other byte is spelled
+    \\xNN, and a literal backslash is doubled so the spelling is unambiguous
+    — the original bytes are always recoverable from the text. This is the
+    third answer to the same byte. The first edition decoded with U+FFFD
+    replacement, which kept the line but ate the byte: the XGPS160 opens
+    every connection with three binary status packets (sync 0x55), and each
+    one lost its single high byte to the replacement character, silently.
+    A binary sink would have kept the byte and lost the reader: raw NULs in
+    the file make grep declare it binary and skip it — a confident zero
+    that has already fooled one of the authors. Escaping keeps both: the
+    record is exact AND stays a text file every editor will open.
+    """
+    out = []
+    for b in raw:
+        if b == 0x5C:
+            out.append("\\\\")
+        elif 0x20 <= b <= 0x7E:
+            out.append(chr(b))
+        else:
+            out.append("\\x%02x" % b)
+    return "".join(out)
+
+
 class LineFramer:
     """Reassembles a byte stream into text lines, whatever the chunking.
 
     A serial read boundary lands wherever it pleases — mid-sentence, mid-
     checksum, between the \\r and the \\n — so the framer owns the only
-    buffer and hands back complete lines only. Decoding is ascii-with-
-    replacement because the capture must survive whatever the device
-    actually says, printable or not; a byte we can't decode becomes U+FFFD
-    and stays in the record instead of killing the run.
+    buffer and hands back complete lines only. Completed lines come back
+    through visible_bytes: pure printable ASCII, non-printables spelled
+    \\xNN, nothing eaten. NMEA is printable ASCII and passes untouched;
+    the binary packets the device actually interleaves become legible
+    instead of landmines.
     """
 
     def __init__(self):
@@ -80,15 +107,16 @@ class LineFramer:
     def feed(self, chunk):
         """Absorb one chunk of bytes; return the list of completed lines.
 
-        Lines are split on \\n; a trailing \\r is stripped, so \\r\\n and
-        bare \\n both frame cleanly. Whatever follows the last \\n stays
-        buffered for the next feed.
+        Lines are split on \\n; trailing \\r is stripped, so \\r\\n and
+        bare \\n both frame cleanly (an interior \\r is data and gets the
+        \\xNN spelling). Whatever follows the last \\n stays buffered for
+        the next feed.
         """
         self.buf += chunk
         lines = []
         while b"\n" in self.buf:
             raw, self.buf = self.buf.split(b"\n", 1)
-            lines.append(raw.decode("ascii", "replace").rstrip("\r"))
+            lines.append(visible_bytes(raw.rstrip(b"\r")))
         return lines
 
 
@@ -128,10 +156,12 @@ def run_capture(src, out, secs, clock=time.time, empty_is_eof=True):
 def open_sink(path):
     """Text file the capture writes to.
 
-    UTF-8, not the locale encoding: LineFramer turns undecodable bytes into
-    U+FFFD so they stay in the record, and cp1252 (Windows' usual default
-    for open(..., "w")) refuses that character — which is how a binary
-    preamble at the start of a GPS feed became a crash instead of a line.
+    The framer emits pure printable ASCII now, so any encoding would carry
+    it — utf-8 stays pinned anyway, because the one crash this tool ever
+    had was the locale getting a vote: cp1252 (Windows' usual default for
+    open(..., "w")) refused the U+FFFD an earlier framer produced, and a
+    binary preamble at the start of a GPS feed became a crash instead of a
+    line. The sink never gets a veto over the framer again.
     """
     return open(path, "w", encoding="utf-8")
 
