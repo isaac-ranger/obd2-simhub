@@ -7,9 +7,13 @@ notebook; then four real captures came back — a driveway control and two
 drives — and the questions the timestamp column was built to answer got
 answered with numbers instead of a spec sheet:
 
-* The advertised 10 Hz belongs to **position only**. GGA and RMC arrive at
-  9.5–9.8 Hz; the satellite gossip (GSV/GSA) and the proprietary `$GPPWR`
-  ride along at 1–3 Hz.
+* The advertised 10 Hz belongs to **position only**, and here is the
+  selector next to the count: GGA and RMC tick at 9.6–9.9 Hz measured
+  from the first NMEA sentence onward. A whole-file census (what
+  `gps_verify.py` prints) reads a shade lower on short captures, because
+  its span includes the ~2 s binary hello before the first sentence.
+  The satellite gossip rides far below either number: GSV bursts at
+  2–3 Hz, GSA and the proprietary `$GPPWR` at about 1 Hz.
 * Every one of 26,104 sentences carried a checksum, and zero failed. Over
   Bluetooth SPP. The boat-autopilot people built well.
 * The device opens every connection with **three binary status packets**

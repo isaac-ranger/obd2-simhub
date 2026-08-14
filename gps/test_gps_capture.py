@@ -137,6 +137,16 @@ got = f.feed(b"a\\b\r\n")
 ok("framer: a literal backslash doubles, so the spelling stays unambiguous",
    got == ["a\\\\b"], f"{got!r}")
 
+f = LineFramer()
+got = f.feed(b"A\r\r\n")
+ok("framer: only the terminator's own \\r is framing; a second one is data",
+   got == ["A\\x0d"], f"{got!r}")
+
+f = LineFramer()
+got = f.feed(b"\x7f!\n")
+ok("framer: DEL is not printable — 0x7f gets the escape, not a free pass",
+   got == ["\\x7f!"], f"{got!r}")
+
 
 def unescape(text):
     """Inverse of visible_bytes — lives here as the proof it has one."""

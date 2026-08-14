@@ -51,6 +51,13 @@ DRIVE_MIN_KMH = 10.0
 # U+FFFD a pre-fix framer left in older captures.
 _DAMAGE = re.compile(r"\\x[0-9a-f]{2}|\ufffd")
 
+# What a sentence type is allowed to look like before the report will echo
+# it. The no-coordinates promise has to hold by construction, not by luck:
+# a corrupt line can put a '$' in front of anything, and whatever follows
+# would otherwise land in the census verbatim.
+_TYPE_OK = re.compile(r"[A-Z0-9]{2,10}")
+_PWR_FIELD_OK = re.compile(r"[0-9A-Fa-f]{1,6}")
+
 
 def parse_capture_lines(lines):
     """(t, sentence) rows from capture text lines; count of rejects.
@@ -62,8 +69,6 @@ def parse_capture_lines(lines):
     malformed = 0
     for line in lines:
         line = line.rstrip("\n")
-        if not line:
-            continue
         if "\t" not in line:
             malformed += 1
             continue
@@ -94,12 +99,13 @@ def analyze(rows):
         di = sentence.find("$")
         body = sentence[di:] if di >= 0 else ""
         if body:
-            types[body[1:].split(",")[0].split("*")[0]] += 1
+            t = body[1:].split(",")[0].split("*")[0]
+            types[t if _TYPE_OK.fullmatch(t) else "(unparseable)"] += 1
             if "*" in body:
                 cs_present += 1
                 if not nmea_checksum_ok(body):
                     cs_failed += 1
-            if body.startswith("$GPPWR"):
+            if body.startswith("$GPPWR,"):
                 fields = body.split(",")
                 if pwr_first is None:
                     pwr_first = fields
@@ -175,7 +181,11 @@ def report(stats, name, malformed=0):
                  f"max {stats['dmax_m']:.1f} m from first fix")
     if stats["pwr_first"]:
         f0, fl = stats["pwr_first"], stats["pwr_last"]
-        v = (f"{f0[1]} -> {fl[1]}" if len(f0) > 1 and len(fl) > 1 else "?")
+        # Same manner as the census: a damaged field is never echoed raw.
+        ok_field = (len(f0) > 1 and len(fl) > 1
+                    and _PWR_FIELD_OK.fullmatch(f0[1])
+                    and _PWR_FIELD_OK.fullmatch(fl[1]))
+        v = f"{f0[1]} -> {fl[1]}" if ok_field else "?"
         lines.append(f"  $GPPWR: {stats['types'].get('GPPWR', 0)} seen, "
                      f"field1 {v} (voltage-shaped: it declines as the "
                      f"battery does)")

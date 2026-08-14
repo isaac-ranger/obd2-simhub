@@ -107,16 +107,19 @@ class LineFramer:
     def feed(self, chunk):
         """Absorb one chunk of bytes; return the list of completed lines.
 
-        Lines are split on \\n; trailing \\r is stripped, so \\r\\n and
-        bare \\n both frame cleanly (an interior \\r is data and gets the
-        \\xNN spelling). Whatever follows the last \\n stays buffered for
-        the next feed.
+        Lines are split on \\n; the single \\r of a \\r\\n terminator is
+        framing and is stripped — exactly one, because any \\r beyond it
+        is data and gets the \\xNN spelling like every other byte the
+        framer doesn't own. Whatever follows the last \\n stays buffered
+        for the next feed.
         """
         self.buf += chunk
         lines = []
         while b"\n" in self.buf:
             raw, self.buf = self.buf.split(b"\n", 1)
-            lines.append(visible_bytes(raw.rstrip(b"\r")))
+            if raw.endswith(b"\r"):
+                raw = raw[:-1]
+            lines.append(visible_bytes(raw))
         return lines
 
 

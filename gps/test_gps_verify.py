@@ -31,8 +31,9 @@ def cs(body):
     return body + "*%02X" % x
 
 
-def rmc(lat_dm="3248.6613", lon_dm="11715.0748", sog_kn="0.0", cog="341.9"):
-    return cs(f"$GPRMC,120000.000,A,{lat_dm},N,{lon_dm},W,"
+def rmc(lat_dm="3248.6613", lon_dm="11715.0748", sog_kn="0.0", cog="341.9",
+        status="A"):
+    return cs(f"$GPRMC,120000.000,{status},{lat_dm},N,{lon_dm},W,"
               f"{sog_kn},{cog},130826,,,D")
 
 
@@ -51,8 +52,8 @@ rows, bad = parse_capture_lines(["0.100\t$GPRMC,x\n", "no tab here\n",
                                  "nan-ish\t$ok\n", "\n", "x\t$y\n"])
 ok("rows: tabbed rows with float stamps land",
    len(rows) == 1 and rows[0] == (0.1, "$GPRMC,x"), f"{rows!r}")
-ok("rows: no-tab and bad-stamp lines are counted, not dropped silently",
-   bad == 3, f"{bad}")
+ok("rows: blank, no-tab and bad-stamp lines are all counted, none dropped",
+   bad == 4, f"{bad}")
 
 # --- a stationary capture: the driveway control ------------------------------
 
@@ -101,7 +102,42 @@ ok("drive: PASSES the drive claim", passed, why)
 passed, why = verdict(dr, "stationary")
 ok("drive: FAILS the stationary claim", not passed, why)
 
+# --- a loop: out, around, home — the commonest drive there is ----------------
+
+# Out 25 fixes north, back 25 to the start. The far point is mid-file and
+# the endpoint is the origin, so this only passes if dmax is a running
+# max — a parser that judges a drive by where it ENDED calls every loop
+# a parking maneuver.
+loop = [rmc(lat_dm=f"{3248.6613 + i * 0.006:.4f}", sog_kn="21.6")
+        for i in list(range(25)) + list(range(24, -1, -1))]
+rows, _ = parse_capture_lines(capture_text(loop))
+lp = analyze(rows)
+ok("loop: the far point counts even though the drive ends at home",
+   250 < lp["dmax_m"] < 300, f"{lp['dmax_m']:.1f}")
+passed, why = verdict(lp, "drive")
+ok("loop: a drive that returns to its driveway still PASSES", passed, why)
+
+# --- the other stationary failure: parked position, moving speedometer -------
+
+liar = [rmc(sog_kn="5.0") for _ in range(10)]     # ~9.3 km/h, zero motion
+rows, _ = parse_capture_lines(capture_text(liar))
+passed, why = verdict(analyze(rows), "stationary")
+ok("stationary: claimed speed fails the control even when position holds",
+   not passed and "km/h" in why, why)
+
 # --- damage and rejection ----------------------------------------------------
+
+# A void (status V) fix parses but is not valid, and buys no verdict.
+rows, _ = parse_capture_lines(capture_text([rmc(status="V")]))
+vs = analyze(rows)
+ok("a status-V fix is parsed but never counted valid",
+   vs["rmc_parsed"] == 1 and vs["rmc_valid"] == 0,
+   f"parsed={vs['rmc_parsed']} valid={vs['rmc_valid']}")
+
+# Old captures spell binary damage as U+FFFD; that arm must count too.
+rows, _ = parse_capture_lines(capture_text(["U\x04�\x00" + gga()]))
+ok("pre-fix U+FFFD damage is still counted as damage",
+   analyze(rows)["damaged"] == 1)
 
 broken = rmc()[:-2] + "00"   # flip the checksum
 rows, _ = parse_capture_lines(capture_text([broken, rmc()]))
@@ -125,6 +161,21 @@ ok("report: never prints a coordinate",
    "48.66" not in text and "15.07" not in text
    and "3248" not in text and "11715" not in text, text)
 ok("report: names the damage count", "1 line(s) carry" in text, text)
+
+# By construction, not by luck: a corrupt line can put '$' in front of
+# anything, and whatever follows must NOT be echoed into the census.
+rows, _ = parse_capture_lines(["0.0\t$3311.9921N11744.0102W\n"])
+hostile = report(analyze(rows), "hostile.txt")
+ok("report: a coordinate-shaped census token is bucketed, never echoed",
+   "(unparseable)" in hostile and "3311" not in hostile
+   and "11744" not in hostile, hostile)
+
+# Same manner for a damaged $GPPWR: fields are shown only when they still
+# look like fields.
+rows, _ = parse_capture_lines(["0.0\t$GPPWR,�8Q,x*00\n"])
+pw = report(analyze(rows), "pwr.txt")
+ok("report: a damaged GPPWR field prints as ?, not raw",
+   "field1 ?" in pw, pw)
 
 print()
 if FAILED:
