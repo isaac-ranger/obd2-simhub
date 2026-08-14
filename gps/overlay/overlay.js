@@ -3,7 +3,7 @@
 
    ?up=north   (default) — map North-up; arrow rotates with heading
    ?up=heading           — arrow fixed pointing up; map rotates with heading
-   ?smooth=off           — draw raw fixes, no bridging (A/B against the default)
+   ?smooth=off           — draw /live's raw_lat/raw_lon, no bridging, no trail skip
 
    Rates: the receiver speaks at ~10 Hz and the poll matches it, but the
    draw loop runs on requestAnimationFrame capped near 30 Hz. Repainting
@@ -11,12 +11,16 @@
    are earned: heading and position ease toward the newest fix, and a short
    dead-reckoning step carries the car forward along its last known course.
    Every new fix corrects it, so error cannot accumulate past one sample.
+   If `t` goes stale past a second, or /live says ok:false, the HUD reads
+   "signal lost Ns" instead of the last speed.
 
-   Driving-scale note: consumer GPS still wanders meters even with a clear
-   sky. The server EMA-smooths and freezes when nearly stopped; the trail
-   still will not perfectly re-trace the same ground — that is the
-   receiver, not the draw path. The faint circle is an HDOP-based honesty
-   radius.
+   Driving-scale note: this receiver pins one coordinate at a true stop
+   and scribbles once you crawl. The server EMA-smooths while moving and
+   freezes in that crawl (below 2 km/h), and that opinion is what /live
+   publishes as lat/lon. The same payload carries raw_lat/raw_lon so
+   ?smooth=off can draw the receiver instead. The default trail still
+   will not perfectly re-trace the same ground — that is the receiver,
+   not the draw path. The faint circle is an HDOP-based honesty radius.
 */
 
 (function () {
@@ -36,10 +40,12 @@
   // smoother and laggier. DR_MAX_MS caps how far ahead of the last fix dead
   // reckoning will guess — a little over one sample interval, so a dropped
   // sample coasts instead of stalling, and a dead feed parks rather than
-  // driving off into fiction.
+  // driving off into fiction. STALE_MS is the long goodbye: past a missed
+  // sample, once the last `t` is this old the HUD stops looking healthy.
   var POS_TAU_MS = 120;
   var HEADING_TAU_MS = 150;
   var DR_MAX_MS = 250;
+  var STALE_MS = 1000;
   var DR_MIN_KMH = 1.0;              // below this, standing still: no DR
   var SNAP_M = 25;                   // a jump this big is a teleport, not motion
 
@@ -64,6 +70,7 @@
   var fixT = null;     // server timestamp of that fix, to spot repeats
   var render = null;   // {lat, lon, heading} the camera actually draws
   var lastFrameMs = 0;
+  var feedError = null;  // last /live fetch failure; draw() owns the HUD
 
   function resize() {
     var dpr = window.devicePixelRatio || 1;
@@ -121,13 +128,25 @@
     return { x: cx + e / mPerPx, y: cy - n / mPerPx };
   }
 
+  /* Default view uses the server's EMA/frozen lat/lon. smooth=off draws
+     the receiver's last fix from the same payload. */
+  function displayPos(f) {
+    if (!smooth && f.raw_lat != null && f.raw_lon != null) {
+      return { lat: f.raw_lat, lon: f.raw_lon };
+    }
+    return { lat: f.lat, lon: f.lon };
+  }
+
   function maybeAppendTrail(lat, lon) {
     var p = { lat: lat, lon: lon };
     if (trail.length === 0) {
       trail.push(p);
       return;
     }
-    if (distM(trail[trail.length - 1], p) < TRAIL_MIN_M) return;
+    // The 3 m skip is a view opinion: idle wander should not scribble
+    // the default trail. smooth=off keeps every sample so the A/B is
+    // actually the receiver, not the receiver minus close points.
+    if (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M) return;
     trail.push(p);
     if (trail.length > TRAIL_MAX_POINTS) {
       trail.splice(0, trail.length - TRAIL_MAX_POINTS);
@@ -135,14 +154,16 @@
   }
 
   /* Where the camera should be right now, given the newest fix and how long
-     ago it landed. Returns the fix itself when smoothing is off. */
+     ago it landed. Returns the (raw or smoothed) fix itself when
+     smoothing is off. */
   function targetState(nowMs) {
-    var target = { lat: fix.lat, lon: fix.lon, heading: fix.heading_deg };
+    var pos = displayPos(fix);
+    var target = { lat: pos.lat, lon: pos.lon, heading: fix.heading_deg };
     if (!smooth) return target;
     var ageMs = Math.min(nowMs - fixAtMs, DR_MAX_MS);
     if (ageMs > 0 && fix.speed_kmh >= DR_MIN_KMH) {
       var metres = (fix.speed_kmh / 3.6) * (ageMs / 1000);
-      var dr = offsetLatLon(fix.lat, fix.lon, fix.heading_deg, metres);
+      var dr = offsetLatLon(pos.lat, pos.lon, fix.heading_deg, metres);
       target.lat = dr.lat;
       target.lon = dr.lon;
     }
@@ -177,8 +198,17 @@
     ctx.lineTo(w, h / 2);
     ctx.stroke();
 
-    if (!fix || !fix.ok || !render) {
-      statusEl.textContent = "waiting for fix…";
+    // A last pose stays on the map when the feed dies; only the HUD
+    // changes. Without that, draw() used to paint 55 km/h over the
+    // fetch-error line every frame and look healthy.
+    if (!render || !fix || fix.lat == null) {
+      if (feedError) {
+        statusEl.textContent = "live feed: " + feedError;
+      } else if (fix && fix.reason) {
+        statusEl.textContent = fix.reason;
+      } else {
+        statusEl.textContent = "waiting for fix…";
+      }
       return;
     }
 
@@ -226,12 +256,21 @@
     var arrowHdg = (upMode === "heading") ? 0 : heading;
     drawArrow(cx, cy, arrowHdg, ARROW_PX);
 
+    var ageMs = fixAtMs ? (window.performance.now() - fixAtMs) : 0;
+    var lost = feedError || fix.ok === false || (fixAtMs && ageMs > STALE_MS);
+    if (lost) {
+      var sec = Math.max(1, Math.floor(ageMs / 1000));
+      statusEl.textContent = "signal lost " + sec + "s";
+      return;
+    }
+
+    var pos = displayPos(fix);
     var acc = (fix.accuracy_m != null)
       ? ("  ±" + fix.accuracy_m.toFixed(1) + " m")
       : "";
     var sats = (fix.sats != null) ? ("  " + fix.sats + " sats") : "";
     statusEl.textContent =
-      fix.lat.toFixed(6) + ", " + fix.lon.toFixed(6) +
+      pos.lat.toFixed(6) + ", " + pos.lon.toFixed(6) +
       "  " + fix.speed_kmh.toFixed(1) + " km/h  hdg " +
       (Math.round(heading) % 360) + "°  up=" + upMode +
       (smooth ? "" : "  smooth=off") + "  " + metersAcross +
@@ -276,6 +315,7 @@
         return r.json();
       })
       .then(function (data) {
+        feedError = null;
         // Polls and fixes are not in step, so a poll often returns the fix
         // we already have. Restarting the dead-reckoning clock on those
         // would rewind the car to the raw fix and undo the bridging, so the
@@ -283,12 +323,13 @@
         if (data && data.ok && data.t !== fixT) {
           fixT = data.t;
           fixAtMs = window.performance.now();
-          maybeAppendTrail(data.lat, data.lon);
+          var pos = displayPos(data);
+          maybeAppendTrail(pos.lat, pos.lon);
         }
         fix = data;
       })
       .catch(function (err) {
-        statusEl.textContent = "live feed: " + err.message;
+        feedError = err.message || String(err);
       });
   }
 

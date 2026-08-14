@@ -145,8 +145,11 @@ exact bytes from any capture made today.
    honest *accuracy*, because the parked capture will lie about it:
    consumer chipsets do static-hold filtering that freezes the fix while
    you're stopped, so a parked receiver impersonates a survey instrument.
-   The same box at speed looks like what it actually is, and that's the
-   number we have to design around.
+   The captures confirmed it: one unique coordinate across the whole
+   driveway file. The overlay freeze below 2 km/h is therefore a crawl
+   hold, not a parked one — the receiver already does the parked pin;
+   it scribbles once you roll. The same box at speed looks like what it
+   actually is, and that's the number we have to design around.
 
 Send back both `xgps160-capture.txt` files (rename them so they don't
 clobber each other — `parked.txt` and `moving.txt` works). If a capture
@@ -181,7 +184,7 @@ anyone your house.
 ## Overlay (v1)
 
 Ego-centered, North-up map: arrow pinned to the center, rotates with
-heading (last COG held when nearly stopped), trail scrolls under the car.
+heading (last COG held in the crawl), trail scrolls under the car.
 Fixed scale (default 200 m across the shorter window edge — street/track
 driving). Browser owns the trail (refresh clears it). Separate process
 from the OBD feed and from the capture tool.
@@ -221,8 +224,18 @@ heading and position ease toward the newest fix, and between fixes the car
 dead-reckons along its last course for at most a quarter second, so a
 dropped sample coasts and a dead feed parks instead of driving off into
 fiction. Every fix corrects it, so the error cannot outlive one sample.
-`?smooth=off` paints raw fixes for an honest A/B — that is the 10 Hz
-staircase the bridging exists to hide.
+If the Bluetooth link drops, the reader catches it and `/live` flips to
+`ok: false` with a reason instead of serving the last speed forever. The
+page ages the last `t` and paints `signal lost Ns` once the fix is older
+than a second — the 250 ms dead-reckon still parks the car; this is the
+long goodbye. A silent port that never raises (Windows timeout returning
+empty) is the same HUD, driven only by the stamp.
+`?smooth=off` paints the receiver's last fix (`raw_lat`/`raw_lon` on
+the same `/live` payload), with no ease, no dead-reckon, and no 3 m
+trail skip — that is the 10 Hz staircase the bridging exists to hide.
+The default `lat`/`lon` is still the server's EMA, frozen in the crawl
+(below 2 km/h, where this receiver releases its parked pin and
+scribbles); that alpha is a constant in `gps_overlay.py`, not a URL param.
 
 Every live overlay run also records the raw NMEA stream in the same format
 as `gps_capture.py`, so it can be fed directly back to `--replay`. The
@@ -272,7 +285,9 @@ plus the byte-escape spelling and its inverse, walked over all 255 possible
 line bytes, and the two-door dispatch: the name classifier, the flag each
 door actually returns, and the rule that an empty read on a timeout'd port
 is a quiet quarter-second, not a goodbye. The nmea and live-state suites
-cover the overlay's RMC/GGA parser and the live-fix smoother; the verify
-suite proves the health checker's controls actually discriminate — its
-synthetic stationary capture must fail the drive claim and vice versa —
-and that its report keeps the no-coordinates promise.
+cover the overlay's RMC/GGA parser, the live-fix smoother, and the
+dropout door: a raised read marks the last pose lost, an empty timeout
+does not. The verify suite proves the health checker's controls
+actually discriminate — its synthetic stationary capture must fail the
+drive claim and vice versa — and that its report keeps the
+no-coordinates promise.

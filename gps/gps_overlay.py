@@ -107,9 +107,11 @@ def describe_port(port_info):
         return port_info.device, "incoming (listen only - will not talk to a GPS)"
     return port_info.device, port_info.description or ""
 
-# Hold last COG / freeze smoothed position when nearly stopped. Below this
-# speed GPS course is noise (parking, lights, alley crawl).
-HEADING_HOLD_KMH = 2.0
+# Crawl band: below this, hold last COG and freeze the smoothed position.
+# A parked XGPS160 already pins one coordinate — the freeze is seconded
+# at a true stop. It earns its keep once the receiver releases the pin
+# and scribbles (lights, alley, parking-lot crawl).
+CRAWL_KMH = 2.0
 # EMA weight of each new raw fix while moving. Lower = smoother, more lag.
 POS_SMOOTH_ALPHA = 0.2
 
@@ -236,7 +238,12 @@ class GpsRunLog:
 
 
 class LiveState:
-    """Thread-safe latest fix for /live."""
+    """Thread-safe latest fix for /live.
+
+    lat/lon are the EMA, frozen in the crawl (below CRAWL_KMH). raw_lat/
+    raw_lon are the last valid RMC as the receiver said it, so a view can
+    A/B without a second authority.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -244,12 +251,15 @@ class LiveState:
             "ok": False,
             "lat": None,
             "lon": None,
+            "raw_lat": None,
+            "raw_lon": None,
             "speed_kmh": 0.0,
             "heading_deg": 0.0,
             "accuracy_m": None,
             "sats": None,
             "t": 0.0,
             "source": "",
+            "reason": None,
         }
         self._heading = 0.0
         self._heading_set = False
@@ -277,16 +287,17 @@ class LiveState:
         raw_lon = float(fix["lon"])
         with self._lock:
             # Seed heading from the first COG we see (even when parked); after
-            # that only trust course while actually moving.
+            # that only trust course above the crawl.
             if course is not None and (
-                    speed >= HEADING_HOLD_KMH or not self._heading_set):
+                    speed >= CRAWL_KMH or not self._heading_set):
                 self._heading = float(course)
                 self._heading_set = True
-            # Position: freeze while stopped (reject GPS wander scribble);
-            # EMA toward the raw fix while moving.
+            # Position: freeze in the crawl. A true stop is already pinned
+            # by the receiver; below 2 km/h it lets go and scribbles, and
+            # that is the band this hold was for. EMA while actually moving.
             if self._lat is None:
                 self._lat, self._lon = raw_lat, raw_lon
-            elif speed >= HEADING_HOLD_KMH:
+            elif speed >= CRAWL_KMH:
                 a = POS_SMOOTH_ALPHA
                 self._lat = a * raw_lat + (1.0 - a) * self._lat
                 self._lon = a * raw_lon + (1.0 - a) * self._lon
@@ -294,13 +305,29 @@ class LiveState:
                 "ok": True,
                 "lat": self._lat,
                 "lon": self._lon,
+                "raw_lat": raw_lat,
+                "raw_lon": raw_lon,
                 "speed_kmh": speed,
                 "heading_deg": self._heading,
                 "accuracy_m": self._accuracy_m,
                 "sats": self._sats,
                 "t": time.time(),
                 "source": source,
+                "reason": None,
             }
+
+    def mark_lost(self, reason: str):
+        """The source is gone. Keep the last pose; stop claiming it is live.
+
+        t is left at the last real fix so the browser can age the goodbye
+        from the same stamp it already has. A dropout mid-drive used to
+        kill the reader thread and leave /live serving ok:true at 55 km/h.
+        """
+        with self._lock:
+            lost = dict(self._fix)
+            lost["ok"] = False
+            lost["reason"] = reason
+            self._fix = lost
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -353,13 +380,25 @@ def make_handler(state: LiveState, static_dir: str):
 
 def reader_serial(src, empty_is_eof, source_name, state: LiveState,
                   stop: threading.Event, run_log: GpsRunLog | None = None):
-    """Pump an open_source() handle into LiveState until stop or hang-up."""
+    """Pump an open_source() handle into LiveState until stop or hang-up.
+
+    A Bluetooth dropout raises OSError (pyserial's SerialException) from
+    read(); a macOS cu door returns empty and that empty is EOF. Either
+    way the last fix must not keep saying ok. stop is a quiet exit, not a
+    lost signal.
+    """
     framer = LineFramer()
     try:
         while not stop.is_set():
-            chunk = src.read(256)
+            try:
+                chunk = src.read(256)
+            except OSError as e:
+                print(f"GPS source dropped ({e})", flush=True)
+                state.mark_lost(f"signal lost: {e}")
+                break
             if not chunk:
                 if empty_is_eof:
+                    state.mark_lost("signal lost: source closed")
                     break
                 continue
             for line in framer.feed(chunk):

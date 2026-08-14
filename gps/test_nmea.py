@@ -23,6 +23,10 @@ RMC = ("$GPRMC,215658.400,A,3248.6613,N,11715.0748,W,000.0,341.9,130826,,,D*76")
 ok("checksum: known-good RMC passes", nmea_checksum_ok(RMC))
 ok("checksum: flipped CS fails",
    not nmea_checksum_ok(RMC[:-2] + "00"))
+ok("checksum: a missing star is not a free pass",
+   not nmea_checksum_ok(RMC.split("*")[0]))
+ok("rmc: truncated of its '*' does not parse",
+   parse_rmc(RMC.split("*")[0]) is None)
 
 fix = parse_rmc(RMC)
 ok("rmc: parses", fix is not None)

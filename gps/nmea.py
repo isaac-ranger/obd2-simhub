@@ -3,7 +3,7 @@ nmea.py — minimal NMEA parsers for the overlay (RMC + GGA)
 ==========================================================
 
 RMC: lat/lon, speed, course. GGA: HDOP / sat count for an honesty circle.
-Talker agnostic ($GP… / $GN… / …). Checksum verified when present.
+Talker agnostic ($GP… / $GN… / …). Checksum required.
 """
 
 from __future__ import annotations
@@ -45,9 +45,14 @@ HDOP_TO_METERS = 5.0
 
 
 def nmea_checksum_ok(sentence: str) -> bool:
-    """True if sentence has no checksum, or '*' CS matches XOR of the body."""
+    """True if '*' CS is present and matches XOR of the body.
+
+    The XGPS160 never omits the checksum (26,104 of 26,104 in the
+    captures). A truncated sentence that lost its '*' but kept its shape
+    used to parse unverified; requiring the star costs nothing real.
+    """
     if "*" not in sentence:
-        return True
+        return False
     body, _, cs = sentence.strip().partition("*")
     if not body.startswith("$") or len(cs) < 2:
         return False
