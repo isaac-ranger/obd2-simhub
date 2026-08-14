@@ -1,0 +1,28 @@
+/* Full-bleed canvas for OBS / Chrome. Pixel size comes from the window
+   (OBS browser source Width x Height); world scale is JS/URL. */
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0f14;
+  color: #c8d0d8;
+  font: 14px/1.3 Consolas, "Courier New", monospace;
+}
+
+#map {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#hud {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}

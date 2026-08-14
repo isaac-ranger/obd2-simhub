@@ -125,6 +125,17 @@ def run_capture(src, out, secs, clock=time.time, empty_is_eof=True):
     return n
 
 
+def open_sink(path):
+    """Text file the capture writes to.
+
+    UTF-8, not the locale encoding: LineFramer turns undecodable bytes into
+    U+FFFD so they stay in the record, and cp1252 (Windows' usual default
+    for open(..., "w")) refuses that character — which is how a binary
+    preamble at the start of a GPS feed became a crash instead of a line.
+    """
+    return open(path, "w", encoding="utf-8")
+
+
 def open_source(port):
     """Open the right door for the port name; returns (source, empty_is_eof).
 
@@ -177,7 +188,7 @@ def parse_args(argv, platform=sys.platform):
 def main(argv=None):
     port, secs = parse_args(sys.argv[1:] if argv is None else argv)
     src, empty_is_eof = open_source(port)
-    with src, open(OUT_NAME, "w") as out:
+    with src, open_sink(OUT_NAME) as out:
         n = run_capture(src, out, secs, empty_is_eof=empty_is_eof)
     print("wrote %s (%d lines)" % (OUT_NAME, n))
     return 0

@@ -15,7 +15,7 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gps_capture import (LineFramer, run_capture, parse_args, is_com_port,
-                         open_source)
+                         open_source, open_sink)
 
 FAILED = []
 
@@ -245,6 +245,27 @@ try:
 except SystemExit:
     died = True
 ok("open_source: a bad path dies with a message, not a traceback", died, "")
+
+# --- open_sink: U+FFFD has to survive the file, not just the framer ----------
+
+# StringIO would hide this: the crash is the locale encoding on a real file.
+# The encoding name is the discriminator; writing one replacement character
+# is the tripwire the Windows parking-lot run actually hit.
+fd, sink_name = tempfile.mkstemp(suffix=".txt")
+os.close(fd)
+try:
+    with open_sink(sink_name) as sink:
+        encoding = sink.encoding
+        n = run_capture(Script([b"$PXGPS,\xff\xfebinary?\r\n"]), sink, 1.0,
+                        clock=FakeClock(), empty_is_eof=True)
+    with open(sink_name, encoding="utf-8") as f:
+        body = f.read()
+finally:
+    os.unlink(sink_name)
+ok("open_sink: the file is UTF-8, so U+FFFD is a legal character",
+   encoding.lower().replace("-", "") == "utf8", f"{encoding!r}")
+ok("open_sink: a binary preamble writes as U+FFFD instead of crashing",
+   n == 1 and "\ufffd" in body, f"n={n} body={body!r}")
 
 # --- parse_args: the promised defaults ---------------------------------------
 

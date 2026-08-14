@@ -1,17 +1,21 @@
 # gps/ — the XGPS160 leg, currently a listening post
 
-There is exactly one tool in this directory and it deliberately understands
+There is a listening post in this directory and it deliberately understands
 nothing. `gps_capture.py` writes down whatever the XGPS160 says, timestamped,
 and draws no conclusions. We have not seen one byte out of this device yet,
-and a parser written before the first capture comes back is a guess wearing
-code — so the parser isn't here. It moves in once the captures tell us what
-it has to parse: which sentences, at what real rate, and whether the
+and a parser written before a real capture comes back is a guess wearing
+code — so capture still doesn't parse. It moves in once the captures tell us
+what it has to parse: which sentences, at what real rate, and whether the
 advertised 10Hz is a promise to every sentence or only to position.
 
 This makes NMEA the third occupant of the trench coat: sentences designed
 for boat autopilots, riding alongside ELM327 AT commands, both older than
 the laptop carrying them, driving a 2025 Porsche dashboard. The rig remains
 at peace with itself.
+
+A second tool, `gps_overlay.py`, is a later and separate process: a browser
+map fed from a live port or a replayed capture. It is not folded into the
+listening post or into `obd_feed`. Capture stays dumb on purpose.
 
 ## A correction, from the author, about the author
 
@@ -120,16 +124,96 @@ for once it won't be user error — this README now has entire sections on
 which door was wrong and which operating system its own author thought
 you had.
 
+## Overlay (v1)
+
+Ego-centered, North-up map: arrow pinned to the center, rotates with
+heading (last COG held when nearly stopped), trail scrolls under the car.
+Fixed scale (default 200 m across the shorter window edge — street/track
+driving). Browser owns the trail (refresh clears it). Separate process
+from the OBD feed and from the capture tool.
+
+The live door is the same two-door open the capture tool uses — a `COMn`
+name goes through pyserial, a `/dev/cu.*` path is a plain file open. Same
+outgoing-port rule as above.
+
+```
+py gps\gps_overlay.py --list-ports
+py gps\gps_overlay.py --port COM5
+py gps\gps_overlay.py --replay runs\gps-last.txt
+```
+
+`--list-ports` names the Bluetooth peer when Windows will tell us, so the
+outgoing XGPS is visible next to the incoming listen-only half of the pair.
+Open in Chrome or an OBS browser source:
+
+```
+http://127.0.0.1:8765/
+http://127.0.0.1:8765/?meters=200
+http://127.0.0.1:8765/?up=heading
+http://127.0.0.1:8765/?meters=200&up=heading
+http://127.0.0.1:8765/?smooth=off
+```
+
+OBS sets pixel Width × Height; the page fills the window. World scale is
+`?meters=` (default 200). Use `?meters=50` if you want the old walking
+yard for paddock testing. Orientation is `?up=north` (default — map
+North-up, arrow rotates) or `?up=heading` (arrow fixed pointing up, map
+rotates with course). Other knobs are constants in `overlay/overlay.js`
+for now and will likely become URL params later.
+
+The page polls `/live` at 10 Hz to match the receiver, but paints from
+requestAnimationFrame at about 30 Hz. The extra frames are not repeats:
+heading and position ease toward the newest fix, and between fixes the car
+dead-reckons along its last course for at most a quarter second, so a
+dropped sample coasts and a dead feed parks instead of driving off into
+fiction. Every fix corrects it, so the error cannot outlive one sample.
+`?smooth=off` paints raw fixes for an honest A/B — that is the 10 Hz
+staircase the bridging exists to hide.
+
+Every live overlay run also records the raw NMEA stream in the same format
+as `gps_capture.py`, so it can be fed directly back to `--replay`. The
+default `--run-log tail` keeps a size-capped `runs\gps-last.txt` and rotates
+the previous data-bearing run to `runs\gps-prev.txt`; a start that receives
+no sentences leaves both alone. Use `--run-log full` for a drive you intend
+to keep (`runs\gps-YYYYMMDD-HHMMSS.txt`), or `--run-log off` for no logging.
+`--log-dir` changes the directory. Replay input is never logged again.
+
+```
+py gps\gps_overlay.py --port COM5
+py gps\gps_overlay.py --port COM5 --run-log full
+py gps\gps_overlay.py --replay runs\gps-last.txt
+```
+
+`config.json` (overlay only — capture has no argparse, so it has no
+config section):
+
+```
+{
+  "gps_overlay": {
+    "port": "COM5",
+    "http_port": 8765,
+    "run_log": "tail",
+    "log_dir": "runs"
+  }
+}
+```
+
+The GPS is not the OBDLink. Put the XGPS port in `gps_overlay`, not in
+`common`, or the overlay will open the adapter.
+
 ## Tests
 
 ```
 py gps\test_gps_capture.py        (Windows)
 python3 gps/test_gps_capture.py   (macOS / anywhere)
+py gps\test_nmea.py
+py gps\test_live_state.py
 ```
 
 Canned byte streams only — no device, no COM port, no pyserial needed. The
-suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`, the
-deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
+capture suite defends the framing (chunks split mid-sentence, `\r\n` vs `\n`,
+the deadline, EOF, Ctrl-C), which is the only promise the capture tool makes —
 plus the two-door dispatch: the name classifier, the flag each door
 actually returns, and the rule that an empty read on a timeout'd port is
-a quiet quarter-second, not a goodbye.
+a quiet quarter-second, not a goodbye. The other two suites cover the
+overlay's RMC/GGA parser and the live-fix smoother.

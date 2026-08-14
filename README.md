@@ -74,8 +74,8 @@ rules, all five of them:
 
 * **`common`** holds values shared by more than one tool (the port, the
   baud). A section named after a tool (`obd_feed`, `obd_probe`,
-  `learn_gears`, `learn_throttle`, `fake_car`, `supervisor`, `report`)
-  applies to that tool only, and beats `common`.
+  `learn_gears`, `learn_throttle`, `gps_overlay`, `fake_car`,
+  `supervisor`, `report`) applies to that tool only, and beats `common`.
 * **The command line beats the file.** `--port COM7` on a config that says
   `COM3` means `COM7`, today only. (To keep that promise airtight, option
   abbreviations are off — spell `--port` out, `--po` is refused.)
@@ -454,7 +454,8 @@ py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
 
 ```
 py probe\test_parse.py            py probe\test_learn_gears.py
-py probe\test_learn_throttle.py
+py probe\test_learn_throttle.py   py gps\test_gps_capture.py
+py gps\test_nmea.py               py gps\test_live_state.py
 py extractor\test_feed.py         py supervisor\test_supervisor.py
 py test_report.py                 py test_config.py
 ```
