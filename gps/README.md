@@ -198,23 +198,26 @@ empty) is the same HUD, driven only by the stamp.
 the same `/live` payload), with no ease, no dead-reckon, and no 3 m
 trail skip — that is the 10 Hz staircase the bridging exists to hide.
 Both views keep the same ten-minute trail window (age, not a point
-count), with one ceiling over it: never more than 5000 points, oldest
+count), with one ceiling over it: never more than 6000 points, oldest
 dropped first. The ceiling is not a window — it is the guarantee that
 the array cannot grow without bound, whatever the poll rate does later.
-In the default view the window is what binds; the ceiling is a safety
-net it does not normally reach. In the raw view the ceiling binds
-first: 10 Hz reaches 5000 in about 8.3 minutes of rolling, so a raw
-trail is eight-odd minutes, not ten, and while parked the raw scribble
-is bounded by nothing else, so a long enough sit at the grid pushes the
-approach out from the front. That is the trade for letting the raw view
-scribble at all — it is the receiver's diary, not the lap. The clock
-for the window pauses while `/live` says `crawl`, so a driveway wait
-or pre-grid does not peel the lap you just drew; `?trailPause=off`
-ages by wall clock even while parked. That pause is an opinion of the
-default view only: `?smooth=off` keeps appending while parked, because
-the idle scribble is the thing that view exists to show. A long light
-in the default view still costs nothing — the 3 m skip appends no
-points.
+6000 is that window at the receiver's nominal rate (ten minutes at
+10 Hz; the page appends per new fix, not per poll), so a rolling raw
+trail reaches the clock and the ceiling in the same breath and the
+clock is the authority. In the default view the 3 m skip appends
+nothing at a light and takes about half an hour of road speed to fill
+the array, so the ceiling is a net it does not normally reach. Where
+the ceiling still binds is where the clock does not run: parked in the
+raw view the clock pauses and the scribble does not, so a long enough
+sit at the grid pushes the approach out from the front. That is the
+trade for letting the raw view scribble at all — it is the receiver's
+diary, not the lap. The clock for the window pauses while `/live` says
+`crawl`, so a driveway wait or pre-grid does not peel the lap you just
+drew; `?trailPause=off` ages by wall clock even while parked. That
+pause is an opinion of the default view only: `?smooth=off` keeps
+appending while parked, because the idle scribble is the thing that
+view exists to show. A long light in the default view still costs
+nothing — the 3 m skip appends no points.
 The default `lat`/`lon` is still the server's EMA, frozen in the crawl
 (below 2 km/h, where this receiver releases its parked pin and
 scribbles); that alpha is a constant in `gps_overlay.py`, not a URL

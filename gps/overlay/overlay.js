@@ -50,16 +50,20 @@
   // The trail is a time window (TRAIL_MAX_MS of trail-clock time) with a
   // ceiling (TRAIL_MAX_POINTS) over it. The ceiling is not a window: it is
   // the guarantee that the array cannot grow without bound whatever the
-  // poll rate does later. In the smoothed view the window is what binds
-  // (the 3 m gate appends nothing at a light and took ~25 minutes to
-  // reach 5000 at road speed); in the raw view the ceiling binds first —
-  // 10 Hz reaches 5000 in ~8.3 minutes of rolling, and while parked the
-  // scribble is bounded by nothing else, so a long enough sit pushes the
-  // approach out from the front. That is the trade for letting the raw
-  // view scribble at all: it is the receiver's diary, not the lap.
+  // poll rate does later. 6000 is the window at the receiver's nominal
+  // rate (10 min x 10 Hz; appends are per new fix, not per poll), so a
+  // rolling raw trail reaches the clock and the ceiling together and the
+  // clock is the authority. The ceiling still binds where the clock does
+  // not run: parked in the raw view the clock pauses and the scribble
+  // does not, so a long enough sit pushes the approach out from the
+  // front. That is the trade for letting the raw view scribble at all —
+  // it is the receiver's diary, not the lap. In the smoothed view the
+  // 3 m gate appends nothing at a light and needs about half an hour of
+  // road speed to fill the array, so the window binds and the ceiling is
+  // a net it does not normally reach.
   var TRAIL_MIN_M = 3;
   var TRAIL_MAX_MS = 10 * 60 * 1000;
-  var TRAIL_MAX_POINTS = 5000;
+  var TRAIL_MAX_POINTS = 6000;
   // The trail clock stops while /live says crawl (the server's freeze
   // band, one authority — this page used to resume at 3 km/h against
   // a server that unfroze at 2, and the paddock crawl in between drew
