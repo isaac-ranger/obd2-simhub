@@ -39,13 +39,23 @@ const OPEN = /\(function\s*\(\)\s*\{\s*"use strict";/;
 const CLOSE = /\}\)\(\);\s*$/;
 // The internals the checks reach for, exported in place of the closing line.
 // Every name here is a top-level binding inside overlay.js's IIFE.
-const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPaused, statusEl];" + // touch every lazily-used name NOW, so a rename fails at load, not mid-run
+const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPaused, statusEl, lonLatToTileFrac, tileToLatLon, zoomForMPerPx, tileUrl, tileCache, mapOn, mapDraw, mapName, visibleTileRange, advanceRender, arrowHeadingDeg, headingCamCoupled, headingCamTauMs];" + // touch every lazily-used name NOW, so a rename fails at load, not mid-run
   "\n__exports = {" +
   " poll: poll, maybeAppendTrail: maybeAppendTrail, draw: draw," +
   " trailState: function () { return { trail: trail, trailClockMs: trailClockMs, trailClockPaused: trailClockPaused }; }," +
-  " setFix: function (f, at) { fix = f; fixAtMs = at; render = { lat: f.lat, lon: f.lon, heading: 0 }; }," +
+  " setFix: function (f, at) { var h = f.heading_deg || 0; fix = f; fixAtMs = at; render = { lat: f.lat, lon: f.lon, heading: h, cameraHeading: h }; }," +
+  " pokeFix: function (f) { fix = f; }," +
+  " advanceRender: advanceRender," +
+  " arrowHeadingDeg: arrowHeadingDeg," +
+  " renderState: function () { return render; }," +
+  " headingCam: function () { return { coupled: headingCamCoupled, tauMs: headingCamTauMs }; }," +
   " status: function () { return statusEl.textContent; }," +
-  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS }" +
+  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS, TILE_PX: TILE_PX, TILE_MAX_Z: TILE_MAX_Z, TILE_MAX_COUNT: TILE_MAX_COUNT, EQUATOR_M: EQUATOR_M, HEADING_TAU_MS: HEADING_TAU_MS, DEFAULT_HEADING_CAM_TAU_MS: DEFAULT_HEADING_CAM_TAU_MS, ARROW_RESIDUAL_MAX_DEG: ARROW_RESIDUAL_MAX_DEG }," +
+  " lonLatToTileFrac: lonLatToTileFrac, tileToLatLon: tileToLatLon," +
+  " zoomForMPerPx: zoomForMPerPx, tileUrl: tileUrl," +
+  " visibleTileRange: visibleTileRange," +
+  " mapFlags: function () { return { mapOn: mapOn, mapDraw: mapDraw, style: mapOn ? mapName : null }; }," +
+  " tiles: function () { return tileCache; }" +
   " };";
 
 class LoaderError extends Error {}
@@ -232,6 +242,128 @@ async function main() {
     t = b.api.trailState();
     ok("poll: crawl=false from /live resumes and appends", t.trailClockPaused === false && t.trail.length === 2, JSON.stringify(t));
     ok("poll: a boolean field arrived, so no 'no crawl field' warning", b.warns.length === 0, JSON.stringify(b.warns));
+  }
+  // 7. slippy-map math (slice 1: north-up Stadia tiles, off by default)
+  {
+    const off = load("");
+    ok("map: default is off", off.api.mapFlags().mapOn === false && off.api.mapFlags().style === null, JSON.stringify(off.api.mapFlags()));
+    off.api.setFix({ ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 0, crawl: false, accuracy_m: null, sats: null }, 0);
+    off.api.draw();
+    ok("map: default draw fetches no tiles", Object.keys(off.api.tiles()).length === 0, JSON.stringify(Object.keys(off.api.tiles())));
+    ok("map: default HUD has no map= token", !/map=/.test(off.api.status()), off.api.status());
+
+    const origin = load("?map=alidade");
+    const t0 = origin.api.lonLatToTileFrac(0, 0, 4);
+    ok("map: lon 0 lat 0 z=4 sits at the centre tile (8, 8)", Math.abs(t0.x - 8) < 1e-9 && Math.abs(t0.y - 8) < 1e-9, JSON.stringify(t0));
+    const nw = origin.api.tileToLatLon(4, 8, 8);
+    ok("map: tile (4,8,8) NW corner is the equator at lon 0", Math.abs(nw.lat) < 1e-9 && Math.abs(nw.lon) < 1e-9, JSON.stringify(nw));
+    const tLon = origin.api.lonLatToTileFrac(0, -180, 3);
+    ok("map: lon -180 is tile x=0", Math.abs(tLon.x) < 1e-9, "x=" + tLon.x);
+    const mpp = origin.api.consts.EQUATOR_M / (origin.api.consts.TILE_PX * Math.pow(2, 10));
+    ok("map: zoomForMPerPx at the equator recovers z=10", origin.api.zoomForMPerPx(mpp, 0) === 10, "z=" + origin.api.zoomForMPerPx(mpp, 0) + " mpp=" + mpp);
+    ok("map: zoomForMPerPx clamps to 1..20", origin.api.zoomForMPerPx(1e-9, 0) === 20 && origin.api.zoomForMPerPx(1e9, 0) === 1, "hi=" + origin.api.zoomForMPerPx(1e-9, 0) + " lo=" + origin.api.zoomForMPerPx(1e9, 0));
+    ok("map: tileUrl has no key when none was given", origin.api.tileUrl(17, 1, 2) === "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/17/1/2.png", origin.api.tileUrl(17, 1, 2));
+    origin.api.setFix({ ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 0, crawl: false, accuracy_m: null, sats: null }, 0);
+    origin.api.draw();
+    ok("map: alidade north-up HUD names the layer", /map=alidade z\d+/.test(origin.api.status()), origin.api.status());
+    ok("map: stadia draw asks for at least one tile", Object.keys(origin.api.tiles()).length > 0, "n=" + Object.keys(origin.api.tiles()).length);
+    ok("map: a 200 m view stays under the fetch cap", Object.keys(origin.api.tiles()).length <= origin.api.consts.TILE_MAX_COUNT, "n=" + Object.keys(origin.api.tiles()).length);
+
+    const keyed = load("?map=alidade&stadiaKey=test-key");
+    ok("map: stadiaKey is appended, not baked into the path",
+       keyed.api.tileUrl(18, 3, 4).indexOf("?api_key=test-key") >= 0 &&
+       keyed.api.tileUrl(18, 3, 4).indexOf("/test-key") < 0,
+       keyed.api.tileUrl(18, 3, 4));
+
+    const hdg = load("?map=alidade&up=heading");
+    ok("map: heading-up draws tiles too", hdg.api.mapFlags().mapOn === true && hdg.api.mapFlags().style === "alidade", JSON.stringify(hdg.api.mapFlags()));
+    hdg.api.setFix({ ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 90, crawl: false, accuracy_m: null, sats: null }, 0);
+    hdg.api.draw();
+    ok("map: heading-up fetches tiles", Object.keys(hdg.api.tiles()).length > 0, "n=" + Object.keys(hdg.api.tiles()).length);
+    ok("map: heading-up HUD names the layer", /map=alidade z\d+/.test(hdg.api.status()) && /up=heading/.test(hdg.api.status()), hdg.api.status());
+    const mppView = 200 / 600;
+    const rN = origin.api.visibleTileRange(LAT, LON, 800, 600, mppView, 18, 0);
+    const r45 = origin.api.visibleTileRange(LAT, LON, 800, 600, mppView, 18, Math.PI / 4);
+    const nN = (rN.x1 - rN.x0 + 1) * (rN.y1 - rN.y0 + 1);
+    const n45 = (r45.x1 - r45.x0 + 1) * (r45.y1 - r45.y0 + 1);
+    ok("map: a 45° heading-up AABB is at least as large as north-up", n45 >= nN, "north=" + nN + " 45=" + n45);
+    const r0h = origin.api.visibleTileRange(LAT, LON, 800, 600, mppView, 18, 0);
+    const rNup = origin.api.visibleTileRange(LAT, LON, 800, 600, mppView, 18);
+    ok("map: omitted heading matches heading 0 (north-up range)",
+       r0h.x0 === rNup.x0 && r0h.x1 === rNup.x1 && r0h.y0 === rNup.y0 && r0h.y1 === rNup.y1,
+       JSON.stringify({ r0h: r0h, rNup: rNup }));
+    const toner = load("?map=toner");
+    ok("map: toner uses the Stamen Toner slug",
+       toner.api.tileUrl(17, 1, 2).indexOf("/stamen_toner/") >= 0 && toner.api.mapFlags().style === "toner",
+       toner.api.tileUrl(17, 1, 2) + " " + JSON.stringify(toner.api.mapFlags()));
+    const terrain = load("?map=terrain");
+    ok("map: terrain uses the Stamen Terrain slug",
+       terrain.api.tileUrl(17, 1, 2).indexOf("/stamen_terrain/") >= 0 && terrain.api.mapFlags().style === "terrain",
+       terrain.api.tileUrl(17, 1, 2) + " " + JSON.stringify(terrain.api.mapFlags()));
+    const alias = load("?map=stadia");
+    ok("map: stadia is an alias for alidade",
+       alias.api.mapFlags().style === "alidade" &&
+       alias.api.tileUrl(17, 1, 2).indexOf("/alidade_smooth_dark/") >= 0,
+       JSON.stringify(alias.api.mapFlags()) + " " + alias.api.tileUrl(17, 1, 2));
+    const unknown = load("?map=nope");
+    ok("map: an unknown style stays off", unknown.api.mapFlags().mapOn === false, JSON.stringify(unknown.api.mapFlags()));
+  }
+  // 8. heading-up camera tau: world follows a slow heading, arrow the residual
+  {
+    const def = load("?up=heading");
+    ok("headingTau: default is 1200 ms, not coupled",
+       def.api.headingCam().tauMs === 1200 && def.api.headingCam().coupled === false,
+       JSON.stringify(def.api.headingCam()));
+    ok("headingTau: default constant matches the README",
+       def.api.consts.DEFAULT_HEADING_CAM_TAU_MS === 1200, "DEFAULT=" + def.api.consts.DEFAULT_HEADING_CAM_TAU_MS);
+    ok("headingTau: residual clamp is 15°", def.api.consts.ARROW_RESIDUAL_MAX_DEG === 15, "max=" + def.api.consts.ARROW_RESIDUAL_MAX_DEG);
+    ok("headingTau: a 10° body lead is shown on the arrow", def.api.arrowHeadingDeg(10, 0) === 10, "arrow=" + def.api.arrowHeadingDeg(10, 0));
+    ok("headingTau: a 90° body lead is clamped to 15°", def.api.arrowHeadingDeg(90, 0) === 15, "arrow=" + def.api.arrowHeadingDeg(90, 0));
+    ok("headingTau: wrap 350→10 is a positive residual, clamped to 15° not −340", def.api.arrowHeadingDeg(10, 350) === 15, "arrow=" + def.api.arrowHeadingDeg(10, 350));
+
+    const north = load("");
+    ok("headingTau: north-up arrow is body heading, not a residual", north.api.arrowHeadingDeg(45, 0) === 45, "arrow=" + north.api.arrowHeadingDeg(45, 0));
+
+    const glued = load("?up=heading&headingTau=0");
+    ok("headingTau=0: coupled", glued.api.headingCam().coupled === true, JSON.stringify(glued.api.headingCam()));
+    ok("headingTau=0: arrow stays screen-up", glued.api.arrowHeadingDeg(90, 0) === 0, "arrow=" + glued.api.arrowHeadingDeg(90, 0));
+    const off = load("?up=heading&headingTau=off");
+    ok("headingTau=off: coupled", off.api.headingCam().coupled === true, JSON.stringify(off.api.headingCam()));
+    const fast = load("?up=heading&headingTau=50");
+    ok("headingTau: a tau faster than body is clamped to HEADING_TAU_MS",
+       fast.api.headingCam().tauMs === fast.api.consts.HEADING_TAU_MS && fast.api.headingCam().coupled === false,
+       JSON.stringify(fast.api.headingCam()));
+
+    const slow = load("?up=heading&headingTau=2000");
+    const live = { ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 0, crawl: false, accuracy_m: null, sats: null };
+    slow.api.setFix(live, 1000);
+    slow.api.pokeFix({ ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 90, crawl: false, accuracy_m: null, sats: null });
+    let now = 1000;
+    for (let i = 0; i < 5; i++) {
+      now += 33;
+      slow.api.advanceRender(now, 33);
+    }
+    const r = slow.api.renderState();
+    ok("headingTau=2000: after 165 ms body has moved well toward 90", r.heading > 40 && r.heading < 90, "body=" + r.heading);
+    ok("headingTau=2000: camera lags body (slow world, fast arrow)",
+       r.cameraHeading < r.heading - 20, "body=" + r.heading + " cam=" + r.cameraHeading);
+    slow.api.draw();
+    ok("headingTau: heading-up HUD prints cam as well as hdg",
+       /hdg /.test(slow.api.status()) && /cam /.test(slow.api.status()), slow.api.status());
+
+    const coupledLive = load("?up=heading&headingTau=0");
+    coupledLive.api.setFix(live, 1000);
+    coupledLive.api.pokeFix({ ok: true, lat: LAT, lon: LON, speed_kmh: 40, heading_deg: 90, crawl: false, accuracy_m: null, sats: null });
+    now = 1000;
+    for (let i = 0; i < 5; i++) {
+      now += 33;
+      coupledLive.api.advanceRender(now, 33);
+    }
+    const rc = coupledLive.api.renderState();
+    ok("headingTau=0: camera stays locked to body",
+       Math.abs(rc.cameraHeading - rc.heading) < 1e-9, "body=" + rc.heading + " cam=" + rc.cameraHeading);
+    coupledLive.api.draw();
+    ok("headingTau=0: HUD has no cam token", !/cam /.test(coupledLive.api.status()), coupledLive.api.status());
   }
 }
 

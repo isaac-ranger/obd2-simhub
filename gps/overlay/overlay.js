@@ -2,7 +2,9 @@
    accept URL params (?meters=, ?metersMax=, ?up=, ?smooth=, ?bg=, ?hud=, ?trailPause=).
 
    ?up=north   (default) — map North-up; arrow rotates with heading
-   ?up=heading           — arrow fixed pointing up; map rotates with heading
+   ?up=heading           — arrow mostly up; map/trail follow a slower camera heading
+   ?headingTau=1200      — camera heading time constant in ms (heading-up). 0 or off:
+                           old behaviour, arrow glued up, world uses body heading
    ?smooth=off           — draw /live's raw_lat/raw_lon, no bridging, no trail skip
    ?meters=200           — floor: metres across the short edge (default 200)
    ?metersMax=1000       — cap: ease out this far to keep the trail on screen
@@ -14,6 +16,11 @@
    ?trailPause=off       — age the trail by wall clock even while parked
                            (default pauses the ten-minute window while the
                            server says crawl)
+   ?map=off|alidade|toner|terrain
+                           — Stadia raster under the trail (default off).
+                             alidade = Smooth Dark; toner / terrain = Stamen.
+                             stadia and on are aliases for alidade.
+   ?stadiaKey=           — optional API key; try 127.0.0.1 without it first
 
    Rates: the receiver speaks at ~10 Hz and the poll matches it, but the
    draw loop runs on requestAnimationFrame capped near 30 Hz. Repainting
@@ -80,7 +87,9 @@
   // driving off into fiction. STALE_MS is the long goodbye: past a missed
   // sample, once the last `t` is this old the HUD stops looking healthy.
   var POS_TAU_MS = 120;
-  var HEADING_TAU_MS = 150;
+  var HEADING_TAU_MS = 150;          // body heading; arrow residual uses this
+  var DEFAULT_HEADING_CAM_TAU_MS = 1200; // map/trail in heading-up; ?headingTau= overrides
+  var ARROW_RESIDUAL_MAX_DEG = 15;   // how far the arrow may yaw off screen-up
   var DR_MAX_MS = 250;
   var STALE_MS = 1000;
   var DR_MIN_KMH = 1.0;              // below this, standing still: no DR
@@ -89,6 +98,16 @@
   var TRAIL_CORE_W = 5;
   var TRAIL_EDGE = "#111111";
   var TRAIL_EDGE_W = 10;
+  var TILE_PX = 256;
+  var TILE_MAX_Z = 20;
+  var TILE_MAX_COUNT = 160;          // viewport plus pad, and √2 more when heading-up rotates the AABB
+  var EQUATOR_M = 40075016.686;      // WGS84 circumference, for mercator metres/pixel
+  var TILE_HOST = "https://tiles.stadiamaps.com/tiles/";
+  var MAP_STYLES = {
+    alidade: { slug: "alidade_smooth_dark", fill: "#1a1a1a", stamen: false },
+    toner:   { slug: "stamen_toner",        fill: "#f0f0f0", stamen: true },
+    terrain: { slug: "stamen_terrain",      fill: "#e8e4d8", stamen: true }
+  };
 
   var params = new URLSearchParams(window.location.search);
   var metersFloor = parseFloat(params.get("meters"));
@@ -114,12 +133,37 @@
   document.body.style.background = bgColor;
   var showHud = (params.get("hud") || "off").toLowerCase() === "on";
   var trailPause = (params.get("trailPause") || "on").toLowerCase() !== "off";
+  var headingTauParam = params.get("headingTau");
+  var headingCamCoupled = false;
+  var headingCamTauMs = DEFAULT_HEADING_CAM_TAU_MS;
+  if (headingTauParam != null && headingTauParam !== "") {
+    if (String(headingTauParam).toLowerCase() === "off") {
+      headingCamCoupled = true;
+    } else {
+      var ht = parseFloat(headingTauParam);
+      if (isFinite(ht) && ht <= 0) headingCamCoupled = true;
+      else if (isFinite(ht)) {
+        headingCamTauMs = ht;
+        if (headingCamTauMs < HEADING_TAU_MS) headingCamTauMs = HEADING_TAU_MS;
+      }
+    }
+  }
+  var mapName = (params.get("map") || "off").toLowerCase();
+  if (mapName === "stadia" || mapName === "on") mapName = "alidade";
+  var mapStyle = MAP_STYLES[mapName] || null;
+  var mapOn = !!mapStyle;
+  var stadiaKey = params.get("stadiaKey") || "";
+  var mapDraw = mapOn;
 
   var canvas = document.getElementById("map");
   var ctx = canvas.getContext("2d");
   var hudEl = document.getElementById("hud");
   var statusEl = document.getElementById("status");
+  var attribEl = document.getElementById("attrib");
+  var attribStamen = document.getElementById("attrib-stamen");
   if (hudEl && !showHud) hudEl.style.display = "none";
+  if (attribEl) attribEl.style.display = mapDraw ? "block" : "none";
+  if (attribStamen) attribStamen.style.display = (mapDraw && mapStyle.stamen) ? "inline" : "none";
 
   var trail = [];      // [{lat, lon, tMs}, ...] tMs is trail-clock, not wall
   var trailClockMs = 0;
@@ -173,6 +217,21 @@
     return (from + delta * k + 360) % 360;
   }
 
+  function angleDelta(from, to) {
+    return ((to - from + 540) % 360) - 180;
+  }
+
+  // Heading-up: arrow shows body minus camera, clamped. North-up: body.
+  // Coupled (headingTau=0/off): arrow glued to screen-up, old behaviour.
+  function arrowHeadingDeg(bodyHdg, camHdg) {
+    if (upMode !== "heading") return bodyHdg;
+    if (headingCamCoupled) return 0;
+    var d = angleDelta(camHdg, bodyHdg);
+    if (d > ARROW_RESIDUAL_MAX_DEG) return ARROW_RESIDUAL_MAX_DEG;
+    if (d < -ARROW_RESIDUAL_MAX_DEG) return -ARROW_RESIDUAL_MAX_DEG;
+    return d;
+  }
+
   // Project EN meters to canvas. headingRad used only for up=heading:
   // rotate so the current course points to screen-up.
   function enToScreen(east, north, cx, cy, mPerPx, headingRad) {
@@ -187,6 +246,134 @@
       n = n2;
     }
     return { x: cx + e / mPerPx, y: cy - n / mPerPx };
+  }
+
+  // Slippy-map (Web Mercator) helpers. Tiles are drawn in the same ENU
+  // frame as the trail; at a few hundred metres the two agree closely.
+  function lonLatToTileFrac(lat, lon, z) {
+    var n = Math.pow(2, z);
+    var x = (lon + 180) / 360 * n;
+    var latRad = (lat * Math.PI) / 180;
+    var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+    return { x: x, y: y };
+  }
+
+  function tileToLatLon(z, x, y) {
+    var n = Math.pow(2, z);
+    var lon = x / n * 360 - 180;
+    var latRad = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+    return { lat: (latRad * 180) / Math.PI, lon: lon };
+  }
+
+  function zoomForMPerPx(mPerPx, lat) {
+    var cos = Math.cos((lat * Math.PI) / 180);
+    if (cos < 0.01) cos = 0.01;
+    var z = Math.round(Math.log(EQUATOR_M * cos / (TILE_PX * mPerPx)) / Math.LN2);
+    if (z < 1) z = 1;
+    if (z > TILE_MAX_Z) z = TILE_MAX_Z;
+    return z;
+  }
+
+  function tileUrl(z, x, y) {
+    var slug = mapStyle ? mapStyle.slug : "alidade_smooth_dark";
+    var url = TILE_HOST + slug + "/" + z + "/" + x + "/" + y + ".png";
+    if (stadiaKey) url += "?api_key=" + encodeURIComponent(stadiaKey);
+    return url;
+  }
+
+  var tileCache = {};
+  var tileFailWarned = false;
+
+  function getTile(z, x, y) {
+    var k = (mapStyle ? mapStyle.slug : "") + "/" + z + "/" + x + "/" + y;
+    if (tileCache[k]) return tileCache[k];
+    if (typeof Image === "undefined") {
+      tileCache[k] = { status: "fail" };
+      return tileCache[k];
+    }
+    var rec = { img: new Image(), status: "loading" };
+    rec.img.onload = function () { rec.status = "ok"; };
+    rec.img.onerror = function () {
+      rec.status = "fail";
+      if (!tileFailWarned) {
+        tileFailWarned = true;
+        console.warn("map tile failed to load; on 127.0.0.1 try without a key, or add ?stadiaKey=");
+      }
+    };
+    rec.img.src = tileUrl(z, x, y);
+    tileCache[k] = rec;
+    return rec;
+  }
+
+  function visibleTileRange(lat0, lon0, w, h, mPerPx, z, headingRad) {
+    headingRad = headingRad || 0;
+    var cx = w / 2;
+    var cy = h / 2;
+    var c = Math.cos(headingRad);
+    var s = Math.sin(headingRad);
+    var screen = [[0, 0], [w, 0], [0, h], [w, h]];
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    var cosLat = Math.cos((lat0 * Math.PI) / 180);
+    for (var i = 0; i < 4; i++) {
+      // Screen → EN: inverse of enToScreen's heading rotation so a
+      // heading-up view still fetches the tiles that fill the corners.
+      var e2 = (screen[i][0] - cx) * mPerPx;
+      var n2 = (cy - screen[i][1]) * mPerPx;
+      var east = e2 * c + n2 * s;
+      var north = -e2 * s + n2 * c;
+      var lat = lat0 + north / 111320.0;
+      var lon = lon0 + east / (111320.0 * cosLat);
+      var t = lonLatToTileFrac(lat, lon, z);
+      if (t.x < minX) minX = t.x;
+      if (t.x > maxX) maxX = t.x;
+      if (t.y < minY) minY = t.y;
+      if (t.y > maxY) maxY = t.y;
+    }
+    var n = Math.pow(2, z);
+    var x0 = Math.floor(minX) - 1;
+    var y0 = Math.floor(minY) - 1;
+    var x1 = Math.ceil(maxX) + 1;
+    var y1 = Math.ceil(maxY) + 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > n - 1) x1 = n - 1;
+    if (y1 > n - 1) y1 = n - 1;
+    return { x0: x0, y0: y0, x1: x1, y1: y1 };
+  }
+
+  function drawTiles(lat0, lon0, cx, cy, mPerPx, w, h, headingRad) {
+    headingRad = headingRad || 0;
+    var z = zoomForMPerPx(mPerPx, lat0);
+    var r = visibleTileRange(lat0, lon0, w, h, mPerPx, z, headingRad);
+    var count = (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
+    if (count <= 0 || count > TILE_MAX_COUNT) return z;
+    ctx.save();
+    if (headingRad) {
+      // Same rotation as enToScreen (φ = −heading): draw tiles north-up
+      // in this frame so they turn with the trail.
+      ctx.translate(cx, cy);
+      ctx.rotate(-headingRad);
+      ctx.translate(-cx, -cy);
+    }
+    for (var x = r.x0; x <= r.x1; x++) {
+      for (var y = r.y0; y <= r.y1; y++) {
+        var rec = getTile(z, x, y);
+        if (!rec || rec.status !== "ok") continue;
+        var nw = tileToLatLon(z, x, y);
+        var se = tileToLatLon(z, x + 1, y + 1);
+        var enNW = enuMeters(lat0, lon0, nw.lat, nw.lon);
+        var enSE = enuMeters(lat0, lon0, se.lat, se.lon);
+        var pNW = enToScreen(enNW.east, enNW.north, cx, cy, mPerPx, 0);
+        var pSE = enToScreen(enSE.east, enSE.north, cx, cy, mPerPx, 0);
+        var dw = pSE.x - pNW.x;
+        var dh = pSE.y - pNW.y;
+        if (dw > 0 && dh > 0) {
+          ctx.drawImage(rec.img, pNW.x, pNW.y, dw, dh);
+        }
+      }
+    }
+    ctx.restore();
+    return z;
   }
 
   /* Default view uses the server's EMA/frozen lat/lon. smooth=off draws
@@ -278,7 +465,12 @@
   function advanceRender(nowMs, dtMs) {
     var target = targetState(nowMs);
     if (!render || !smooth || distM(render, target) > SNAP_M) {
-      render = { lat: target.lat, lon: target.lon, heading: target.heading };
+      render = {
+        lat: target.lat,
+        lon: target.lon,
+        heading: target.heading,
+        cameraHeading: target.heading
+      };
       return;
     }
     var kPos = 1 - Math.exp(-dtMs / POS_TAU_MS);
@@ -286,6 +478,13 @@
     render.lat += (target.lat - render.lat) * kPos;
     render.lon += (target.lon - render.lon) * kPos;
     render.heading = angleLerp(render.heading, target.heading, kHdg);
+    if (headingCamCoupled) {
+      render.cameraHeading = render.heading;
+    } else {
+      var kCam = 1 - Math.exp(-dtMs / headingCamTauMs);
+      var camFrom = (render.cameraHeading != null) ? render.cameraHeading : render.heading;
+      render.cameraHeading = angleLerp(camFrom, target.heading, kCam);
+    }
   }
 
   function trailRadiusM(lat0, lon0) {
@@ -327,20 +526,23 @@
     var h = window.innerHeight;
     ctx.clearRect(0, 0, w, h);
 
-    // Subtle crosshair (screen axes: up/sides — body axes when up=heading)
-    ctx.strokeStyle = "rgba(200,208,216,0.12)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(w / 2, 0);
-    ctx.lineTo(w / 2, h);
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
-    ctx.stroke();
+    function drawCrosshair() {
+      // Subtle crosshair (screen axes: up/sides — body axes when up=heading)
+      ctx.strokeStyle = "rgba(200,208,216,0.12)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(w / 2, 0);
+      ctx.lineTo(w / 2, h);
+      ctx.moveTo(0, h / 2);
+      ctx.lineTo(w, h / 2);
+      ctx.stroke();
+    }
 
     // A last pose stays on the map when the feed dies; only the HUD
     // changes. Without that, draw() used to paint 55 km/h over the
     // fetch-error line every frame and look healthy.
     if (!render || !fix || fix.lat == null) {
+      drawCrosshair();
       if (feedError) {
         statusEl.textContent = "live feed: " + feedError;
       } else if (fix && fix.reason) {
@@ -355,10 +557,25 @@
     var mPerPx = metersAcross / shortEdge;
     var lat0 = render.lat;
     var lon0 = render.lon;
-    var heading = render.heading;
-    var headingRad = (heading * Math.PI) / 180;
+    var bodyHdg = render.heading;
+    var camHdg = render.cameraHeading;
+    if (camHdg == null || headingCamCoupled || upMode !== "heading") {
+      camHdg = bodyHdg;
+    }
+    var heading = bodyHdg;
+    var headingRad = ((upMode === "heading" ? camHdg : bodyHdg) * Math.PI) / 180;
+    var tileHdgRad = (upMode === "heading") ? (camHdg * Math.PI) / 180 : 0;
     var cx = w / 2;
     var cy = h / 2;
+    var mapZ = null;
+
+    if (mapDraw) {
+      ctx.fillStyle = mapStyle.fill;
+      ctx.fillRect(0, 0, w, h);
+      mapZ = drawTiles(lat0, lon0, cx, cy, mPerPx, w, h, tileHdgRad);
+    }
+
+    drawCrosshair();
 
     // Honesty circle: typical horizontal error band from HDOP (rotation-invariant)
     if (fix.accuracy_m && fix.accuracy_m > 0) {
@@ -397,8 +614,10 @@
       ctx.stroke();
     }
 
-    // Arrow: rotates in north-up; fixed pointing up in heading-up
-    var arrowHdg = (upMode === "heading") ? 0 : heading;
+    // Arrow: north-up follows body heading. Heading-up is screen-up plus
+    // a clamped residual (body − camera) so COG jitter twists the arrow
+    // instead of the world. headingTau=0 glues it up again.
+    var arrowHdg = arrowHeadingDeg(bodyHdg, camHdg);
     drawArrow(cx, cy, arrowHdg, ARROW_PX);
 
     var ageMs = fixAtMs ? (window.performance.now() - fixAtMs) : 0;
@@ -418,12 +637,18 @@
     // the older-server case, where the trail clock is not pausing.
     var crawl = (fix.crawl === true) ? "  crawl"
       : (fix.crawl === false) ? "" : "  crawl?";
+    var mapHud = mapDraw
+      ? ("  map=" + mapName + (mapZ != null ? " z" + mapZ : ""))
+      : "";
+    var camHud = (upMode === "heading" && !headingCamCoupled)
+      ? (" cam " + (Math.round(camHdg) % 360) + "°")
+      : "";
     statusEl.textContent =
       pos.lat.toFixed(6) + ", " + pos.lon.toFixed(6) +
       "  " + fix.speed_kmh.toFixed(1) + " km/h" + crawl + "  hdg " +
-      (Math.round(heading) % 360) + "°  up=" + upMode +
+      (Math.round(heading) % 360) + "°" + camHud + "  up=" + upMode +
       (smooth ? "" : "  smooth=off") + "  " + Math.round(metersAcross) +
-      " m  trail " + trail.length + acc + sats;
+      " m  trail " + trail.length + acc + sats + mapHud;
   }
 
   function drawArrow(cx, cy, headingDeg, size) {

@@ -161,18 +161,38 @@ add knobs for a bench or a different view:
 ```
 http://127.0.0.1:8765/                 (OBS: transparent, no HUD)
 http://127.0.0.1:8765/?bg=grey&hud=on  (browser bench)
+http://127.0.0.1:8765/?bg=dark&hud=on&map=alidade
+http://127.0.0.1:8765/?bg=grey&hud=on&map=toner
+http://127.0.0.1:8765/?bg=grey&hud=on&map=terrain
 ```
 
 ```
 ?meters=200          floor: metres across the short edge
 ?metersMax=1000      zoom-out cap; same as ?meters= locks the scale
-?up=heading          arrow fixed up, map rotates (default north-up)
+?up=heading          map/trail follow a slow camera heading; arrow may yaw a little
+?headingTau=1200     that camera time constant in ms (default 1200). 0 or off:
+                     old heading-up (arrow glued up, world uses body heading)
 ?bg=grey             solid bench (default transparent for OBS)
 ?bg=dark             original near-black stage
 ?hud=on              status line (hidden)
 ?trailPause=off      age by wall clock while parked (default pauses)
 ?smooth=off          raw fixes, no bridging (debug)
+?map=off|alidade|toner|terrain
+                     Stadia raster under the trail (default off).
+                     alidade = Smooth Dark; toner / terrain = Stamen.
+                     stadia and on still mean alidade.
+?stadiaKey=          optional Stadia API key (try 127.0.0.1 without it first)
 ```
+
+`?map=alidade` (or `toner` / `terrain`) is a prototype. `?up=heading` rotates
+the basemap with a slower camera heading so GPS course jitter twists the
+arrow instead of the world; `?headingTau=` is that time constant in
+milliseconds (default 1200). `?headingTau=0` or `off` is the old
+glued-arrow behaviour. The default URL stays transparent for OBS. Lock
+the scale (`?meters=200&metersMax=200`) if you want a fixed zoom. If
+tiles 401, add `?stadiaKey=` from the dashboard; do not put the key in a
+tracked file. Toner and Terrain are light; `?bg=grey` is a better bench
+than `?bg=dark`.
 
 OBS sets pixel Width × Height; the page fills the window. Scale stays
 at the floor while the trail fits, eases out toward the cap when the
@@ -300,12 +320,12 @@ Node is a *test* dependency, full stop. The simhub, the capture tool and
 the overlay server run on Python and pyserial; the overlay page itself
 needs nothing but a browser. Node exists here only to run `overlay.js` on
 a bench, with a small shim standing in for the window, and if you skip
-installing it you lose these 25 checks and nothing else — nothing that
+installing it you lose these 63 checks and nothing else — nothing that
 drives, records or draws depends on it. Any node from the last few years
 will do (written against 22; it uses node's standard library and nothing
 from npm): install from nodejs.org, make sure `node --version` answers
 from a fresh terminal, run the line above from the repo root. A pass
-ends with a line like `all 25 checks passed` and exits 0. A failing
+ends with a line like `all 63 checks passed` and exits 0. A failing
 check prints `FAIL`, the check's name and what it actually saw, and
 exits 1. Exit 2 means the file could not load `overlay.js` at all —
 that is the bench's coupling to the IIFE wrapper, not a trail bug, and
@@ -316,5 +336,8 @@ the raw view scribbles while parked and never past the ceiling; the
 ceiling is 6000 and never binds before the ten-minute clock at 10 Hz;
 parked points age out by clock, not by being pushed off the front; a
 `/live` with no crawl field warns once, never pauses and reads
-`crawl?`; the HUD prints `crawl` when the field says so; and `poll()`
-hands the trail `data.crawl`, not the speed.
+`crawl?`; the HUD prints `crawl` when the field says so; `poll()`
+hands the trail `data.crawl`, not the speed; `?map=` stays off unless
+asked; slippy-map math inverts at the equator; heading-up fetches
+the extra corner tiles a rotated view needs; and `?headingTau=` keeps a
+slow camera heading so the arrow, not the world, takes the COG jitter.

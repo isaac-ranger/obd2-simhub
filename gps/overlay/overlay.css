@@ -29,3 +29,24 @@ html, body {
   pointer-events: none;
   user-select: none;
 }
+
+#attrib {
+  display: none;
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+  font-size: 11px;
+  color: #9aa4ae;
+  user-select: none;
+}
+
+#attrib-stamen {
+  display: none;
+}
+
+#attrib a {
+  color: #c8d0d8;
+}
