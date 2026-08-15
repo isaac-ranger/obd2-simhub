@@ -461,6 +461,19 @@ py supervisor\test_supervisor.py  py test_report.py
 py test_config.py
 ```
 
+One more, and it is not Python — the GPS overlay's page logic is
+JavaScript, so its 24 checks run under **node**:
+
+```
+node gps\overlay\test_overlay.js
+```
+
+Node is a test dependency only. Nothing that drives, records or draws
+needs it — the whole simhub still runs on Python and pyserial — so if you
+never install it, that one line is all that goes quiet, and those 24
+checks are all you give up. Details, exit codes and what it defends are
+in [gps/README.md](gps/README.md#tests).
+
 The parser suite is 51 adversarial fixtures (single-frame, batched, ISO-TP
 multi-frame, spaced/unspaced/lowercase, multi-ECU, negative responses, ELM
 error strings, truncation). The feed suite **replays a real drive** and asserts
