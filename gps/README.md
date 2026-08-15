@@ -199,17 +199,22 @@ the same `/live` payload), with no ease, no dead-reckon, and no 3 m
 trail skip — that is the 10 Hz staircase the bridging exists to hide.
 Both views keep the same ten-minute trail window (age, not a point
 count), with one ceiling over it: never more than 5000 points, oldest
-dropped first. The ceiling is not a window and never decides what a
-drive looks like — it is the guarantee that the array cannot grow
-without bound, whatever the poll rate does later. The clock for the
-window pauses while `/live` says `crawl`, so a driveway wait or
-pre-grid does not peel the lap you just drew; `?trailPause=off` ages
-by wall clock even while parked. That pause is an opinion of the
+dropped first. The ceiling is not a window — it is the guarantee that
+the array cannot grow without bound, whatever the poll rate does later.
+In the default view the window is what binds; the ceiling is a safety
+net it does not normally reach. In the raw view the ceiling binds
+first: 10 Hz reaches 5000 in about 8.3 minutes of rolling, so a raw
+trail is eight-odd minutes, not ten, and while parked the raw scribble
+is bounded by nothing else, so a long enough sit at the grid pushes the
+approach out from the front. That is the trade for letting the raw view
+scribble at all — it is the receiver's diary, not the lap. The clock
+for the window pauses while `/live` says `crawl`, so a driveway wait
+or pre-grid does not peel the lap you just drew; `?trailPause=off`
+ages by wall clock even while parked. That pause is an opinion of the
 default view only: `?smooth=off` keeps appending while parked, because
-the idle scribble is the thing that view exists to show, and the
-ceiling is what keeps a 10 Hz scribble at the grid honest. A long
-light in the default view still costs nothing — the 3 m skip appends
-no points.
+the idle scribble is the thing that view exists to show. A long light
+in the default view still costs nothing — the 3 m skip appends no
+points.
 The default `lat`/`lon` is still the server's EMA, frozen in the crawl
 (below 2 km/h, where this receiver releases its parked pin and
 scribbles); that alpha is a constant in `gps_overlay.py`, not a URL
@@ -218,9 +223,12 @@ param. The same decision is published as `crawl: true|false` on `/live`
 a speed threshold of its own — one authority for "the car is crawling",
 living next to the code that freezes the position. With `?hud=on` the
 status line says `crawl` while it is true. `crawl?` on the HUD means the
-server never sent the field (an older `gps_overlay.py` behind a newer
-page): the trail then ages by wall clock, as `?trailPause=off` does,
-and the browser console says so once.
+server never sent the field — in practice a `gps_overlay.py` started
+before a pull and still running under the newer page. The trail then
+ages by wall clock, as `?trailPause=off` does, and the browser console
+says so once; restart the server and it goes away. (A stale cached page
+prints neither word — it is still running the old rule silently, and a
+hard refresh is the fix for that one.)
 
 Every live overlay run also records the raw NMEA stream in the same format
 as `gps_capture.py`, so it can be fed directly back to `--replay`. The

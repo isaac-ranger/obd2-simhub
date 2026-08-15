@@ -135,6 +135,21 @@ for kmh in (CRAWL_KMH - 0.5, CRAWL_KMH - 0.01, CRAWL_KMH,
     ok(f"crawl@{kmh:.2f} km/h: the EMA agrees (frozen iff crawl)",
        frozen == bs["crawl"], f"frozen={frozen} crawl={bs['crawl']!r}")
 
+# The heading hold reads the same decision: seeded from the first COG even
+# when parked, then only followed while not crawling.
+h = LiveState()
+h.update_rmc(at_kmh(here, 0.0))
+ok("heading: seeded from the first COG even while crawling",
+   h.snapshot()["heading_deg"] == 10.0, f"{h.snapshot()['heading_deg']}")
+turned = dict(there)
+turned["course_deg"] = 200.0
+h.update_rmc(at_kmh(turned, CRAWL_KMH - 0.01))
+ok("heading: held while crawl (COG 200 ignored below the line)",
+   h.snapshot()["heading_deg"] == 10.0, f"{h.snapshot()['heading_deg']}")
+h.update_rmc(at_kmh(turned, CRAWL_KMH))
+ok("heading: follows COG at the line and above (crawl false)",
+   h.snapshot()["heading_deg"] == 200.0, f"{h.snapshot()['heading_deg']}")
+
 # What actually goes over the wire: the field is named crawl and is a JSON
 # boolean, not a string or a number the page would have to interpret.
 wire = json.loads(json.dumps(snap_m))

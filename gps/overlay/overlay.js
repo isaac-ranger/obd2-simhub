@@ -48,12 +48,15 @@
   var DRAW_HZ = 30;                  // paint rate, decoupled from the GPS
   // Skip trail points closer than this so idle GPS wander does not scribble.
   // The trail is a time window (TRAIL_MAX_MS of trail-clock time) with a
-  // ceiling (TRAIL_MAX_POINTS) over it. The window is what the views
-  // share; the ceiling is not a window and never decides what a drive
-  // looks like — it only guarantees the array cannot grow without bound,
-  // whatever the poll rate does later. Raw at 10 Hz reaches it in
-  // ~8 minutes; the smoothed view, appending nothing at a light and
-  // ~25 points/min at road speed, does not.
+  // ceiling (TRAIL_MAX_POINTS) over it. The ceiling is not a window: it is
+  // the guarantee that the array cannot grow without bound whatever the
+  // poll rate does later. In the smoothed view the window is what binds
+  // (the 3 m gate appends nothing at a light and took ~25 minutes to
+  // reach 5000 at road speed); in the raw view the ceiling binds first —
+  // 10 Hz reaches 5000 in ~8.3 minutes of rolling, and while parked the
+  // scribble is bounded by nothing else, so a long enough sit pushes the
+  // approach out from the front. That is the trade for letting the raw
+  // view scribble at all: it is the receiver's diary, not the lap.
   var TRAIL_MIN_M = 3;
   var TRAIL_MAX_MS = 10 * 60 * 1000;
   var TRAIL_MAX_POINTS = 5000;
@@ -192,11 +195,14 @@
   }
 
   /* crawl is /live's own decision (true = frozen band, false = moving).
-     A server that never sends it (older gps_overlay.py, cached page) gets
-     no pause at all: the clock ages by wall time exactly as ?trailPause=off
-     does, the HUD reads "crawl?", and the console says so once. That is
-     the pre-crawl-field behaviour, chosen over inventing a speed threshold
-     here — a second opinion on the crawl is the bug this field removed. */
+     A server that never sends it — in practice a gps_overlay.py started
+     before a pull and still running under this newer page — gets no pause
+     at all: the clock ages by wall time exactly as ?trailPause=off does,
+     the HUD reads "crawl?", and the console says so once. Restart the
+     server to fix it. (A stale cached page has no such string; it runs
+     its own old rule silently.) That is the pre-crawl-field behaviour,
+     chosen over inventing a speed threshold here — a second opinion on
+     the crawl is the bug this field removed. */
   function advanceTrailClock(nowMs, crawl) {
     if (typeof crawl !== "boolean" && !crawlWarned) {
       crawlWarned = true;
