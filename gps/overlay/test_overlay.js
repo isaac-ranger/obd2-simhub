@@ -19,7 +19,8 @@
    else — OPEN and CLOSE just below are the two anchors — and unwrap() refuses
    loudly, naming this file and the anchor, if either stops matching exactly
    once. Reformat the wrapper and this fails as "update the loader", by name;
-   rename one of the exported internals and it fails the same way. A test that
+   rename any internal the export list reaches for and it fails the same way,
+   at load, naming the internal — never part-way through a run. A test that
    fails for the wrong reason is worse than no test on someone else's machine.
 
    The browser is a small shim: window.performance.now() is a clock the checks
@@ -38,7 +39,8 @@ const OPEN = /\(function\s*\(\)\s*\{\s*"use strict";/;
 const CLOSE = /\}\)\(\);\s*$/;
 // The internals the checks reach for, exported in place of the closing line.
 // Every name here is a top-level binding inside overlay.js's IIFE.
-const EXPORTS = "\n__exports = {" +
+const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPaused, statusEl];" + // touch every lazily-used name NOW, so a rename fails at load, not mid-run
+  "\n__exports = {" +
   " poll: poll, maybeAppendTrail: maybeAppendTrail, draw: draw," +
   " trailState: function () { return { trail: trail, trailClockMs: trailClockMs, trailClockPaused: trailClockPaused }; }," +
   " setFix: function (f, at) { fix = f; fixAtMs = at; render = { lat: f.lat, lon: f.lon, heading: 0 }; }," +
@@ -96,7 +98,7 @@ function load(query) {
   try {
     vm.runInContext(BODY, sandbox, { filename: FILE });
   } catch (e) {
-    if (e instanceof ReferenceError) {
+    if (e && e.name === "ReferenceError") { // vm errors are another realm's — instanceof would never be true
       throw new LoaderError("cannot load " + FILE + ": " + e.message + ". If that " +
         "name is one of EXPORTS at the top of test_overlay.js, overlay.js renamed " +
         "an internal this loader reaches for; update EXPORTS.");
@@ -136,6 +138,14 @@ async function main() {
     const t3 = b.api.trailState();
     ok("smooth: crawl=false resumes and appends", t3.trail.length === 3 && t3.trailClockPaused === false, JSON.stringify(t3));
     ok("bench: no crawl warning when the field is a boolean", b.warns.length === 0, JSON.stringify(b.warns));
+    // the 3 m skip: 0.00002 deg of latitude is ~2.2 m, 0.00004 is ~4.4 m.
+    // (trailState() hands back the live array, so take the lengths as numbers.)
+    b.api.maybeAppendTrail(LAT + 60 * STEP + 0.00002, LON, false); b.tick(100);
+    const lenAfter2m = b.api.trailState().trail.length;
+    b.api.maybeAppendTrail(LAT + 60 * STEP + 0.00004, LON, false); b.tick(100);
+    const lenAfter4m = b.api.trailState().trail.length;
+    ok("smooth: a moving fix under 3 m from the last point is skipped, one over 3 m is kept",
+       lenAfter2m === 3 && lenAfter4m === 4, "after 2.2 m: " + lenAfter2m + ", after 4.4 m: " + lenAfter4m);
   }
   // 2. the ceiling: what it is, and that it is a ceiling and not the window
   {
@@ -155,7 +165,7 @@ async function main() {
     ok("raw: the ceiling holds, never one point more", t.trail.length === c.TRAIL_MAX_POINTS, "len=" + t.trail.length);
     ok("raw: the clock is still paused while crawling", t.trailClockPaused === true && t.trailClockMs === 2000, JSON.stringify({ paused: t.trailClockPaused, clock: t.trailClockMs }));
     const pausedTMs = t.trailClockMs;
-    ok("raw: points appended while paused all carry the paused tMs", t.trail.every(p => p.tMs === pausedTMs), "");
+    ok("raw: points appended while paused all carry the paused tMs", t.trail.every(p => p.tMs === pausedTMs), "points not at the paused tMs: " + t.trail.filter(p => p.tMs !== pausedTMs).length);
     // Roll for just over ten minutes of trail time at 5 Hz: 3050 fixes x 200 ms.
     // Fewer new points than the ceiling on purpose — if the parked points
     // vanish it is because they AGED OUT, not because the ceiling pushed
