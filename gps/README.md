@@ -198,14 +198,29 @@ empty) is the same HUD, driven only by the stamp.
 the same `/live` payload), with no ease, no dead-reckon, and no 3 m
 trail skip — that is the 10 Hz staircase the bridging exists to hide.
 Both views keep the same ten-minute trail window (age, not a point
-count). The clock for that window pauses below 2 km/h and resumes
-above 3, so a driveway wait or pre-grid does not peel the lap you
-just drew; `?trailPause=off` ages by wall clock even while parked.
-A long light still cannot spend a point budget on a two-meter circle
-— there is no point budget.
+count), with one ceiling over it: never more than 5000 points, oldest
+dropped first. The ceiling is not a window and never decides what a
+drive looks like — it is the guarantee that the array cannot grow
+without bound, whatever the poll rate does later. The clock for the
+window pauses while `/live` says `crawl`, so a driveway wait or
+pre-grid does not peel the lap you just drew; `?trailPause=off` ages
+by wall clock even while parked. That pause is an opinion of the
+default view only: `?smooth=off` keeps appending while parked, because
+the idle scribble is the thing that view exists to show, and the
+ceiling is what keeps a 10 Hz scribble at the grid honest. A long
+light in the default view still costs nothing — the 3 m skip appends
+no points.
 The default `lat`/`lon` is still the server's EMA, frozen in the crawl
 (below 2 km/h, where this receiver releases its parked pin and
-scribbles); that alpha is a constant in `gps_overlay.py`, not a URL param.
+scribbles); that alpha is a constant in `gps_overlay.py`, not a URL
+param. The same decision is published as `crawl: true|false` on `/live`
+(`null` before the first fix), and the page reads it instead of keeping
+a speed threshold of its own — one authority for "the car is crawling",
+living next to the code that freezes the position. With `?hud=on` the
+status line says `crawl` while it is true. `crawl?` on the HUD means the
+server never sent the field (an older `gps_overlay.py` behind a newer
+page): the trail then ages by wall clock, as `?trailPause=off` does,
+and the browser console says so once.
 
 Every live overlay run also records the raw NMEA stream in the same format
 as `gps_capture.py`, so it can be fed directly back to `--replay`. The
@@ -254,7 +269,9 @@ plus the byte-escape spelling and its inverse, walked over all 255 possible
 line bytes, and the COM door: the name classifier, the flag it actually
 returns, and the rule that an empty read on a timeout'd port is a quiet
 quarter-second, not a goodbye. The nmea and live-state suites
-cover the overlay's RMC/GGA parser, the live-fix smoother, and the
+cover the overlay's RMC/GGA parser, the live-fix smoother, the
+`crawl` field it publishes (both sides of the 2 km/h line, and that it
+is the same decision that freezes the EMA, not a twin), and the
 dropout door: a raised read marks the last pose lost, an empty timeout
 does not. The verify suite proves the health checker's controls
 actually discriminate — its synthetic stationary capture must fail the

@@ -242,7 +242,10 @@ class LiveState:
 
     lat/lon are the EMA, frozen in the crawl (below CRAWL_KMH). raw_lat/
     raw_lon are the last valid RMC as the receiver said it, so a view can
-    A/B without a second authority.
+    A/B without a second authority. crawl is that same decision published:
+    True while the EMA is frozen, False while it runs, None before the
+    first fix — a view that wants to know whether the car is crawling
+    reads it here instead of comparing speed against a constant of its own.
     """
 
     def __init__(self):
@@ -255,6 +258,7 @@ class LiveState:
             "raw_lon": None,
             "speed_kmh": 0.0,
             "heading_deg": 0.0,
+            "crawl": None,
             "accuracy_m": None,
             "sats": None,
             "t": 0.0,
@@ -285,11 +289,14 @@ class LiveState:
         course = fix.get("course_deg")
         raw_lat = float(fix["lat"])
         raw_lon = float(fix["lon"])
+        # The one crawl decision. The heading hold, the position freeze and
+        # the published field all read this name — a second comparison
+        # against CRAWL_KMH anywhere else is a twin that will drift.
+        crawl = speed < CRAWL_KMH
         with self._lock:
             # Seed heading from the first COG we see (even when parked); after
             # that only trust course above the crawl.
-            if course is not None and (
-                    speed >= CRAWL_KMH or not self._heading_set):
+            if course is not None and (not crawl or not self._heading_set):
                 self._heading = float(course)
                 self._heading_set = True
             # Position: freeze in the crawl. A true stop is already pinned
@@ -297,7 +304,7 @@ class LiveState:
             # that is the band this hold was for. EMA while actually moving.
             if self._lat is None:
                 self._lat, self._lon = raw_lat, raw_lon
-            elif speed >= CRAWL_KMH:
+            elif not crawl:
                 a = POS_SMOOTH_ALPHA
                 self._lat = a * raw_lat + (1.0 - a) * self._lat
                 self._lon = a * raw_lon + (1.0 - a) * self._lon
@@ -309,6 +316,7 @@ class LiveState:
                 "raw_lon": raw_lon,
                 "speed_kmh": speed,
                 "heading_deg": self._heading,
+                "crawl": crawl,
                 "accuracy_m": self._accuracy_m,
                 "sats": self._sats,
                 "t": time.time(),

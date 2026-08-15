@@ -1,5 +1,6 @@
 """LiveState smoothing tests. Run: python gps/test_live_state.py"""
 import io
+import json
 import os
 import sys
 import tempfile
@@ -7,7 +8,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gps_overlay import GpsRunLog, LiveState, reader_serial
+from gps_overlay import CRAWL_KMH, GpsRunLog, LiveState, reader_serial
 from nmea import parse_rmc
 
 FAILED = []
@@ -92,6 +93,56 @@ s2.update_rmc(rmc("3248.6800", "11715.0748", "3.0", "0.0"))
 ok("dropout: a later fix restores ok and clears the reason",
    s2.snapshot()["ok"] is True and s2.snapshot()["reason"] is None,
    f"{s2.snapshot()}")
+
+# crawl: the freeze decision, published. One comparison in the server;
+# the browser reads this instead of keeping a threshold of its own.
+ok("crawl: null before the first fix (no opinion yet, like sats)",
+   LiveState().snapshot()["crawl"] is None,
+   f"{LiveState().snapshot()['crawl']!r}")
+ok("crawl: parked (0 km/h) publishes true", snap1["crawl"] is True,
+   f"{snap1['crawl']!r}")
+ok("crawl: the scribble band (~0.9 km/h) publishes true",
+   csnap["crawl"] is True, f"{csnap['crawl']!r}")
+ok("crawl: moving (~5.6 km/h) publishes false", snap_m["crawl"] is False,
+   f"{snap_m['crawl']!r}")
+ok("crawl: survives a dropout with the last value, like the pose",
+   lost["crawl"] is False, f"{lost['crawl']!r}")
+
+# The boundary, both sides, and the promise that matters: crawl is the SAME
+# decision that freezes the EMA, not a second one that could drift from it.
+# Feed a fix ~16 m away at each speed; frozen <=> the EMA did not move.
+here = rmc("3248.6613", "11715.0748", "0.0", "10.0")
+there = rmc("3248.6700", "11715.0748", "0.0", "10.0")
+
+
+def at_kmh(base, kmh):
+    f = dict(base)
+    f["speed_kmh"] = kmh
+    return f
+
+
+for kmh in (CRAWL_KMH - 0.5, CRAWL_KMH - 0.01, CRAWL_KMH,
+            CRAWL_KMH + 0.01, CRAWL_KMH + 0.5):
+    b = LiveState()
+    b.update_rmc(at_kmh(here, kmh))
+    lat_before = b.snapshot()["lat"]
+    b.update_rmc(at_kmh(there, kmh))
+    bs = b.snapshot()
+    frozen = abs(bs["lat"] - lat_before) < 1e-12
+    expect_crawl = kmh < CRAWL_KMH
+    ok(f"crawl@{kmh:.2f} km/h: published {str(expect_crawl).lower()}",
+       bs["crawl"] is expect_crawl, f"crawl={bs['crawl']!r}")
+    ok(f"crawl@{kmh:.2f} km/h: the EMA agrees (frozen iff crawl)",
+       frozen == bs["crawl"], f"frozen={frozen} crawl={bs['crawl']!r}")
+
+# What actually goes over the wire: the field is named crawl and is a JSON
+# boolean, not a string or a number the page would have to interpret.
+wire = json.loads(json.dumps(snap_m))
+ok("crawl: /live payload carries a JSON boolean named crawl",
+   wire.get("crawl") is False and "crawl" in wire, f"{wire.get('crawl')!r}")
+wire_parked = json.loads(json.dumps(snap1))
+ok("crawl: /live payload says true when parked",
+   wire_parked.get("crawl") is True, f"{wire_parked.get('crawl')!r}")
 
 # GPS run logs use capture's replay-ready format and OBD's tail/full/off policy.
 class Clock:

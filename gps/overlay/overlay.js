@@ -12,7 +12,8 @@
    ?bg=dark              — original near-black stage
    ?hud=on               — show the status line (hidden by default)
    ?trailPause=off       — age the trail by wall clock even while parked
-                           (default pauses the ten-minute window when stopped)
+                           (default pauses the ten-minute window while the
+                           server says crawl)
 
    Rates: the receiver speaks at ~10 Hz and the poll matches it, but the
    draw loop runs on requestAnimationFrame capped near 30 Hz. Repainting
@@ -26,10 +27,12 @@
    Driving-scale note: this receiver pins one coordinate at a true stop
    and scribbles once you crawl. The server EMA-smooths while moving and
    freezes in that crawl (below 2 km/h), and that opinion is what /live
-   publishes as lat/lon. The same payload carries raw_lat/raw_lon so
-   ?smooth=off can draw the receiver instead. The default trail still
-   will not perfectly re-trace the same ground — that is the receiver,
-   not the draw path. The faint circle is an HDOP-based honesty radius.
+   publishes as lat/lon — and as `crawl`, so this page never has to
+   compare speed against a threshold of its own. The same payload
+   carries raw_lat/raw_lon so ?smooth=off can draw the receiver instead.
+   The default trail still will not perfectly re-trace the same ground —
+   that is the receiver, not the draw path. The faint circle is an
+   HDOP-based honesty radius.
 */
 
 (function () {
@@ -44,19 +47,22 @@
   var POLL_MS = 100;                 // match ~10 Hz GPS
   var DRAW_HZ = 30;                  // paint rate, decoupled from the GPS
   // Skip trail points closer than this so idle GPS wander does not scribble.
-  // The trail is a time window, not a point budget: a count cap made the
-  // two views cover different drives. Raw at 10 Hz filled 5000 points in
-  // ~8 minutes; the 3 m gate stretched the default toward ~25 at road
-  // speed and appended nothing at a light — so a long red light spent
-  // the raw buffer on a two-meter circle and ate the approach.
+  // The trail is a time window (TRAIL_MAX_MS of trail-clock time) with a
+  // ceiling (TRAIL_MAX_POINTS) over it. The window is what the views
+  // share; the ceiling is not a window and never decides what a drive
+  // looks like — it only guarantees the array cannot grow without bound,
+  // whatever the poll rate does later. Raw at 10 Hz reaches it in
+  // ~8 minutes; the smoothed view, appending nothing at a light and
+  // ~25 points/min at road speed, does not.
   var TRAIL_MIN_M = 3;
   var TRAIL_MAX_MS = 10 * 60 * 1000;
-  // Trail clock pauses below PAUSE, resumes above RESUME, so a 2 km/h
-  // twitch does not restart the hourglass. Sitting does not consume
-  // the ten-minute window; skipping expire without freezing now would
-  // wipe the lap on throttle-up.
-  var TRAIL_PAUSE_BELOW_KMH = 2.0;
-  var TRAIL_RESUME_ABOVE_KMH = 3.0;
+  var TRAIL_MAX_POINTS = 5000;
+  // The trail clock stops while /live says crawl (the server's freeze
+  // band, one authority — this page used to resume at 3 km/h against
+  // a server that unfroze at 2, and the paddock crawl in between drew
+  // as a chord). Sitting does not consume the ten-minute window;
+  // skipping expire without freezing now would wipe the lap on
+  // throttle-up.
   var ARROW_PX = 28;
   var LIVE_URL = "/live";
 
@@ -112,6 +118,7 @@
   var trailClockMs = 0;
   var trailClockWallMs = 0;
   var trailClockPaused = true;
+  var crawlWarned = false;  // said "no crawl field" to the console once
   var fix = null;      // newest server snapshot
   var fixAtMs = 0;     // performance.now() when a NEW fix landed
   var fixT = null;     // server timestamp of that fix, to spot repeats
@@ -184,16 +191,19 @@
     return { lat: f.lat, lon: f.lon };
   }
 
-  function advanceTrailClock(nowMs, speed) {
-    if (trailPause) {
-      if (trailClockPaused) {
-        if (speed >= TRAIL_RESUME_ABOVE_KMH) trailClockPaused = false;
-      } else if (speed < TRAIL_PAUSE_BELOW_KMH) {
-        trailClockPaused = true;
-      }
-    } else {
-      trailClockPaused = false;
+  /* crawl is /live's own decision (true = frozen band, false = moving).
+     A server that never sends it (older gps_overlay.py, cached page) gets
+     no pause at all: the clock ages by wall time exactly as ?trailPause=off
+     does, the HUD reads "crawl?", and the console says so once. That is
+     the pre-crawl-field behaviour, chosen over inventing a speed threshold
+     here — a second opinion on the crawl is the bug this field removed. */
+  function advanceTrailClock(nowMs, crawl) {
+    if (typeof crawl !== "boolean" && !crawlWarned) {
+      crawlWarned = true;
+      console.warn("/live has no crawl field: trail clock will not pause " +
+                   "while parked (older gps_overlay.py?)");
     }
+    trailClockPaused = trailPause && crawl === true;
     if (!trailClockPaused && trailClockWallMs > 0) {
       trailClockMs += nowMs - trailClockWallMs;
     }
@@ -207,23 +217,34 @@
     if (i > 0) trail.splice(0, i);
   }
 
-  function maybeAppendTrail(lat, lon, speed) {
+  function capTrail() {
+    if (trail.length > TRAIL_MAX_POINTS) {
+      trail.splice(0, trail.length - TRAIL_MAX_POINTS);
+    }
+  }
+
+  function maybeAppendTrail(lat, lon, crawl) {
     var nowMs = window.performance.now();
-    advanceTrailClock(nowMs, speed || 0);
+    advanceTrailClock(nowMs, crawl);
     var p = { lat: lat, lon: lon, tMs: trailClockMs };
     if (trail.length === 0) {
       trail.push(p);
       return;
     }
-    // Do not append while the clock is paused (even smooth=off): a
-    // 10 Hz scribble at the grid would grow without bound. The 3 m
-    // skip still applies while moving slowly with the clock running.
-    if (trailClockPaused ||
-        (smooth && distM(trail[trail.length - 1], p) < TRAIL_MIN_M)) {
+    // The pause and the 3 m skip are both opinions of the default view.
+    // smooth=off appends every sample, parked or not — the idle scribble
+    // is the phenomenon that view exists to show — and the point ceiling
+    // is what keeps a 10 Hz scribble at the grid from growing without
+    // bound. Points appended while the clock is paused all carry the
+    // paused tMs, so they age out together once the car rolls.
+    if (smooth &&
+        (trailClockPaused ||
+         distM(trail[trail.length - 1], p) < TRAIL_MIN_M)) {
       expireTrail();
       return;
     }
     trail.push(p);
+    capTrail();
     expireTrail();
   }
 
@@ -383,9 +404,13 @@
       ? ("  ±" + fix.accuracy_m.toFixed(1) + " m")
       : "";
     var sats = (fix.sats != null) ? ("  " + fix.sats + " sats") : "";
+    // "crawl" while the server says so; "crawl?" when it never says —
+    // the older-server case, where the trail clock is not pausing.
+    var crawl = (fix.crawl === true) ? "  crawl"
+      : (fix.crawl === false) ? "" : "  crawl?";
     statusEl.textContent =
       pos.lat.toFixed(6) + ", " + pos.lon.toFixed(6) +
-      "  " + fix.speed_kmh.toFixed(1) + " km/h  hdg " +
+      "  " + fix.speed_kmh.toFixed(1) + " km/h" + crawl + "  hdg " +
       (Math.round(heading) % 360) + "°  up=" + upMode +
       (smooth ? "" : "  smooth=off") + "  " + Math.round(metersAcross) +
       " m  trail " + trail.length + acc + sats;
@@ -439,7 +464,7 @@
           fixT = data.t;
           fixAtMs = window.performance.now();
           var pos = displayPos(data);
-          maybeAppendTrail(pos.lat, pos.lon, data.speed_kmh);
+          maybeAppendTrail(pos.lat, pos.lon, data.crawl);
         }
         fix = data;
       })
