@@ -41,12 +41,16 @@ a path from *I have the hardware* to *I know it works*. Each leg has one.
 | leg | the path | the proof step |
 |---|---|---|
 | **OBD2** (steps 1–5 below) | probe → learn your gearbox → point SimHub at it → run the feed → run the supervisor | **Step 1**: `py probe\obd_probe.py --port COM3` prints what your car advertises and how fast it answers. If that table appears, the adapter is talking to the car and not just to itself. |
-| **GPS** ([`gps/`](gps/README.md)) | capture → verify the capture → run the overlay | `py gps\gps_capture.py COM5 60`, then `py gps\gps_verify.py xgps160-capture.txt --expect stationary` (parked) or `--expect drive`. The exit code is the verdict: a parked capture that claims motion, or a drive that goes nowhere, fails before any map is drawn — and the report never prints a coordinate, so it's safe to paste into a mail. |
+| **GPS** ([`gps/`](gps/README.md)) | capture → verify the capture → run the overlay | `py gps\gps_capture.py COM5 60`, then `py gps\gps_verify.py xgps160-capture.txt --expect stationary` (parked) or `--expect drive` (rename between the two — each run overwrites the file). The exit code is the verdict: a parked capture that claims motion, or a drive that goes nowhere, fails before any map is drawn — and the report never prints a coordinate, so it's safe to paste into a mail. The capture itself begins at your front curb, which is why `.gitignore` already refuses it. |
 
 The legs are separate processes and share nothing at runtime; what they
-share is the config file, the two-COM-ports-pick-the-outgoing-one ritual,
-and a project that wants both on the same screen. Everything from *What
-you need* down is the OBD2 ladder as it always was; the GPS leg's own
+share is the two-COM-ports-pick-the-outgoing-one ritual and a project that
+wants both on the same screen. They share `config.json` only halfway: the
+overlay reads it, and its port goes under `gps_overlay`, not `common` —
+`common.port` is the adapter, and an overlay that inherits it opens the
+OBDLink; the capture tool takes its port on the command line and reads no
+config at all. Everything from *What you need* down is the OBD2 ladder,
+with a GPS line added where the two legs touch; the GPS leg's own
 lab-notebook lives in [`gps/README.md`](gps/README.md), numbers and all.
 
 ---

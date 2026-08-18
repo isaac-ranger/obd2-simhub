@@ -9,6 +9,10 @@ config.json
 # and this repo has a public remote. Keep them out by default; a log only
 # goes in if its owner says so, by name.
 logs/
+# The GPS capture tool writes xgps160-capture.txt into the directory you run
+# it from, and the front door tells you to run it from here. It begins at
+# somebody's front curb. Same rule as the drive logs: never by accident.
+xgps160-capture.txt
 # Working analysis and pre-ship QA reports: internal, and they go stale the
 # moment the code moves.
 CALIBRATION-FINDINGS.md
