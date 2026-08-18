@@ -243,13 +243,18 @@ per-rpm table so you can see how much of that your car has. Nothing in this
 shape of calibration can remove it.
 
 Drive mode is not one of the variables — measured, not assumed. Four idle
-captures on the reference car, one per mode (normal / individual / sport /
-sport+, n = 88 / 76 / 95 / 99 samples, ~20 s each, every sample at 0 km/h in
-gear 0): all four read **11.8 %** at the median. The two modes that share an
-idle speed agree to 0.02 points; sport and sport+ idle about 120 rpm higher
-(~805 vs ~685) and average 0.12 points more, a third of the PID's own 0.4-point
-step. Mode moves idle rpm, rpm moves the plate — a little — and the learner
-already keys on rpm and never on mode, so learn in whichever mode you drive.
+captures on the reference car, engine warm, one per mode (normal / individual
+/ sport / sport+, n = 88 / 76 / 95 / 99 samples, ~20 s each, every sample at
+0 km/h in gear 0): each pair of modes that shares an idle speed is
+indistinguishable — means 0.02 and 0.003 points apart, and a capture this
+short cannot see anything under ~0.1 — and all four sat on the same **11.8 %**
+step at the median that morning. Sport and sport+ idle about 120 rpm higher
+(~805 vs ~685) and average 0.1 ± 0.03 points more: a third of the PID's own
+0.4-point step, and less than the same idle has drifted between sessions on
+this car as the engine warmed. Mode sets idle rpm, idle rpm nudges the plate
+— a little — and the learner's selectors already run on speed, load and rpm
+and never on mode, so learn in whichever mode you drive; at idle, at least,
+it cannot tell the difference.
 
 Delete the `throttle` section entirely and the feed sends raw ÷ 100 exactly as
 it did before — 0 and 100 are the identity map, so this is safe to skip.
