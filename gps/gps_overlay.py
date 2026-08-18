@@ -22,7 +22,9 @@ default. Use --run-log full to keep a timestamped run, or off to disable it.
 Once running, stdout carries one status line per second — the same shape
 as the OBD feed's — read from the same state /live serves (fix age, speed,
 crawl, ok / LOST / waiting). It never goes quiet: a lost or missing source
-prints too, with the age climbing. That line is what a supervisor watches.
+prints too, with the age climbing. That line is what a supervisor will
+watch — today's supervisor keys on the OBD feed's RPM column and does not
+read this one yet; teaching it the GPS leg is the next step.
 
 Requires: python 3.9+, pyserial for a COM port (replay is stdlib only).
 The live door is gps_capture.open_source — same two-door rule as capture.
@@ -36,6 +38,7 @@ import mimetypes
 import os
 import re
 import sys
+import _thread
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -402,8 +405,23 @@ def status_ticker(state: LiveState, stop: threading.Event, out=None,
     out = sys.stdout if out is None else out
     t0 = mono()
     while not stop.wait(interval):
-        print(status_line(state.snapshot(), wall(), mono() - t0),
-              file=out, flush=True)
+        try:
+            print(status_line(state.snapshot(), wall(), mono() - t0),
+                  file=out, flush=True)
+        except OSError as e:
+            # The liveness channel itself is gone (reader of the pipe died,
+            # redirect target closed or full). The run log's policy for a
+            # failed side write is "continue without" — this is not a side
+            # write, it is the pulse. Going quiet here would be the exact
+            # silence the line exists to end, so fall toward loud: say so
+            # once and hand main() its Ctrl-C path.
+            try:
+                print(f"GPS status line: stdout failed ({e}) — stopping",
+                      file=sys.stderr, flush=True)
+            except OSError:
+                pass
+            _thread.interrupt_main()
+            return
 
 
 def make_handler(state: LiveState, static_dir: str):

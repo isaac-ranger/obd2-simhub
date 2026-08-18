@@ -423,6 +423,59 @@ ok("ticker: after the drop it keeps printing (silence is what gets punished)",
    sum("GPS LOST" in ln for ln in tick_lines) >= 2, f"{tick_lines[-4:]}")
 ok("ticker: stop ends it", not tick_thread.is_alive())
 
+# The ticker's age is the snapshot's stamp against the injected wall clock,
+# not a stamp the ticker took when it first noticed the fix. Fix at 1000,
+# ticker's wall at 1030 -> 30.0 s, on the ticker's own line.
+age_wall = WallClock(1000.0)
+age_state = LiveState(clock=age_wall)
+age_state.update_rmc(rmc("3248.6613", "11715.0748", "0.5", "10.0"))  # crawl
+age_wall.now = 1030.0
+age_stop = threading.Event()
+age_out = io.StringIO()
+age_thread = threading.Thread(
+    target=status_ticker,
+    args=(age_state, age_stop, age_out, 0.02, age_wall), daemon=True)
+age_thread.start()
+time.sleep(0.12)
+age_stop.set()
+age_thread.join(timeout=2.0)
+age_lines = age_out.getvalue().splitlines()
+ok("ticker: the age on its line is the fix stamp against the wall clock (30.0 s)",
+   age_lines and all("age  30.0s" in ln for ln in age_lines), f"{age_lines[:2]}")
+ok("ticker: crawl yes rides the line while parked",
+   age_lines and all("crawl yes" in ln for ln in age_lines), f"{age_lines[:1]}")
+
+
+# stdout gone: the pulse must not fail toward silence. The ticker says so on
+# stderr and hands main() its Ctrl-C path, instead of dying quietly while
+# the process keeps serving.
+class DeadPipe(io.StringIO):
+    def write(self, s):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+import _thread
+interrupted = []
+_real_interrupt = _thread.interrupt_main
+_thread.interrupt_main = lambda *a, **k: interrupted.append(True)
+try:
+    dead_stop = threading.Event()
+    dead_err = io.StringIO()
+    real_stderr = sys.stderr
+    sys.stderr = dead_err
+    try:
+        status_ticker(LiveState(), dead_stop, DeadPipe(), 0.01)
+    finally:
+        sys.stderr = real_stderr
+finally:
+    _thread.interrupt_main = _real_interrupt
+ok("ticker: a dead stdout ends the ticker instead of raising through it",
+   True)
+ok("ticker: a dead stdout interrupts main (fails loud, not silent)",
+   interrupted == [True], f"{interrupted}")
+ok("ticker: a dead stdout is named on stderr",
+   "stdout failed" in dead_err.getvalue(), dead_err.getvalue())
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {FAILED}")
