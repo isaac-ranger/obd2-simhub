@@ -65,7 +65,7 @@ It is the **OBD leg's** boolean, then and now; the GPS leg has its own at
 | `state` | `STARTING` · `LIVE` · `STALLED` · `RECONNECTING` · `NO_ADAPTER` · `STOPPED` — the OBD leg's state, then and now |
 | `healthy` | `true` only in `LIVE` |
 | `summary` | one speakable sentence |
-| `updated_at` / `updated_unix` | when this file was last written (UTC) |
+| `updated_at` / `updated_unix` | when this file was last written — `updated_at` in local time with its offset (`2026-08-01T09:23:34-07:00`), `updated_unix` as the epoch for arithmetic |
 | `stale_after_s` | older than this = the supervisor is gone. See above. |
 | `detail.mode` | `live` or `replay` |
 | `detail.seconds_since_data` | how long since the car last answered |

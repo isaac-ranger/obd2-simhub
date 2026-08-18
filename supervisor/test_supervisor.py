@@ -382,7 +382,14 @@ stop(proc)
 print("\nend to end: no adapter")
 tmp = tempfile.mkdtemp()
 proc, sp = run_supervisor(tmp, write_stub(tmp, "noad.py", STUB_NO_ADAPTER), settle=2.0)
+# The state cycles STARTING -> NO_ADAPTER every backoff; one read on a loaded
+# machine can land on the STARTING half. Poll to a deadline, as the wedge
+# test does, so a slow box proves the same thing a fast one does.
+deadline = time.time() + 5
 s = read_status(sp)
+while time.time() < deadline and s["state"] != "NO_ADAPTER":
+    time.sleep(0.1)
+    s = read_status(sp)
 ok("reports NO_ADAPTER, not a generic reconnect",
    s["state"] == "NO_ADAPTER", s["state"])
 ok("tells the driver what to physically do",
@@ -459,6 +466,33 @@ ok("the recorded reason is the supervisor's own judgement",
    (s["detail"]["last_exit"] or {}).get("reason", "")[:60])
 ok("the fresh run reached data again after the kill",
    s["detail"]["samples_seen"] > 3, str(s["detail"]["samples_seen"]))
+stop(proc)
+
+# --- a fresh run is judged from its own birth -------------------------------------
+# The per-run guard: after a stall-kill, the fresh feed's FIRST answer takes a
+# while (a real reconnect spends ~12 silent seconds in adapter reset and
+# autotune). Judged from its own birth it reaches data; judged from its
+# ancestor's last words it inherits the silence and is killed at the starting
+# line, every time. The ship-qa pass found the guard had no witness — a mutant
+# without it stayed green — so this run says whether it is still there.
+print("\nend to end: a slow-starting fresh run is not killed at the starting line")
+STUB_SLOW_THEN_WEDGE = """
+import time
+time.sleep(1.5)                       # the reconnect: adapter reset, autotune
+for n in range(1, 4):
+    print(f"  t {n:5.0f}s  RPM  2000  speed 40 km/h (true)  gear 3  "
+          f"poll  5.0 Hz  udp {n*60} pkts", flush=True)
+    time.sleep(0.1)
+time.sleep(60)                        # then it wedges
+"""
+tmp = tempfile.mkdtemp()
+proc, sp = run_supervisor(tmp, write_stub(tmp, "slow_wedge.py", STUB_SLOW_THEN_WEDGE),
+                          extra=("--stall-restart-seconds", "2.5"), settle=10.5)
+s = read_status(sp)
+ok("each fresh run gets its own stall budget and reaches data",
+   s["detail"]["samples_seen"] >= 6, f"{s['detail']['samples_seen']} samples")
+ok("so it is restarted for wedging, not for being born slow",
+   s["detail"]["restarts"] <= 2, f"{s['detail']['restarts']} restarts in 10.5 s")
 stop(proc)
 
 # --- the staleness contract -------------------------------------------------------
@@ -708,6 +742,10 @@ st2.set_state("STALLED")
 ok("OBD stalled, the sentence says so", st2.spoken().startswith("OBD stalled"), st2.spoken())
 ok("the OBD detail block is untouched by the second leg",
    set(both["detail"]) == set(solo["detail"]))
+st3 = Status(os.path.join(tempfile.mkdtemp(), "s.json"), stale_after_s=10, replay=True, gps=g2)
+st3.set_state("LIVE")
+ok("a replay feed says replaying in the two-leg sentence too, not live",
+   st3.spoken().startswith("OBD replaying for"), st3.spoken())
 
 # --- end to end: both legs up -----------------------------------------------------
 print("\nend to end: both legs up")
@@ -736,6 +774,10 @@ ok("both legs say STOPPED after a deliberate shutdown",
    f"{final['state']} / {final['gps']['state']}")
 ok("both pids cleared", final["detail"]["feed_pid"] is None and final["gps"]["detail"]["pid"] is None)
 ok("the banner names the GPS child", "gps_ok.py" in out and "believed when it says LOST" in out)
+gps_banner = [ln for ln in out.splitlines() if ln.startswith("supervisor: watching") and "gps_ok.py" in ln]
+ok("the GPS child is handed the supervisor's --config — one file governs every process",
+   gps_banner and "--config " + CFG_FIXTURE in gps_banner[0],
+   gps_banner[0][:100] if gps_banner else "(no banner line)")
 try:
     os.kill(gps_pid, 0)
     orphan = True

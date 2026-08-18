@@ -419,7 +419,8 @@ class Status:
         12 minutes', 'stalled for 40 seconds', 'reconnecting (attempt 3)'."""
         in_state = human_duration((now() - self.state_since).total_seconds())
         if self.state == "LIVE":
-            return f"live for {in_state}"
+            return (f"replaying for {in_state}" if self.replay
+                    else f"live for {in_state}")
         if self.state == "STALLED":
             gap = self.seconds_since_data()
             if gap is None:
@@ -1014,7 +1015,9 @@ def build_parser():
     ap.add_argument("--gps-args", default="",
                     help="command line for the GPS overlay, in one quoted "
                          "string split on spaces: --gps-args \"--port COM5\" "
-                         "or --gps-args \"--replay runs\\gps-last.txt\". "
+                         "or --gps-args \"--replay runs\\gps-last.txt\". A "
+                         "lone flag needs the = form (--gps-args=--list-ports) "
+                         "or argparse reads it as an option of this program. "
                          "Anything that needs quoting goes in config.json")
     ap.add_argument("--gps-overlay", help="path to gps_overlay.py")
     ap.add_argument("--gps-fix-age-seconds", type=float, default=30.0,
@@ -1083,9 +1086,15 @@ def main():
     status.write()
 
     stopping = threading.Event()
+    # The handler only flips a plain flag. Event.set() takes a lock, and a
+    # second signal landing while the first handler holds it deadlocks the
+    # main thread inside its own handler — seen once with SIGINT+SIGTERM
+    # back to back. The loop below polls the flag once per interval, so a
+    # ctrl-c is honoured within one status write.
+    stop_flag = []
 
     def on_signal(signum, _frame):
-        stopping.set()
+        stop_flag.append(signum)
 
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
@@ -1130,14 +1139,14 @@ def main():
     legs = [Leg("obd", argv, status, log_file, args, echo=not args.quiet,
                 stall_kill_seconds=(0 if replay else args.stall_restart_seconds))]
     if gps_argv:
-        # No replay exemption here: a GPS replay keeps printing (LOST at
-        # EOF, with the reason), so the only way it goes silent is a wedge.
+        # No replay exemption here: a GPS replay loops the capture and keeps
+        # printing its line, so the only way it goes silent is a wedge.
         legs.append(Leg("gps", gps_argv, gps, log_file, args,
                         echo=not args.quiet,
                         stall_kill_seconds=args.stall_restart_seconds))
 
     try:
-        while not stopping.is_set():
+        while not stop_flag:
             for leg in legs:
                 leg.tick()
             status.write()

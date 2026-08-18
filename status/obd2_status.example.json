@@ -3,7 +3,7 @@
   "state": "LIVE",
   "healthy": true,
   "summary": "OBD live for 47 minutes, GPS crawling.",
-  "updated_at": "2026-08-01T16:23:34Z",
+  "updated_at": "2026-08-01T16:23:34-07:00",
   "updated_unix": 1785601414,
   "stale_after_s": 10,
   "legs": [
@@ -12,29 +12,36 @@
   ],
   "detail": {
     "mode": "live",
-    "state_since": "2026-08-01T16:23:34Z",
+    "state_since": "2026-08-01T16:23:34-07:00",
     "seconds_in_state": 2847,
-    "last_data_at": "2026-08-01T16:23:34Z",
+    "last_data_at": "2026-08-01T16:23:34-07:00",
     "seconds_since_data": 0.4,
     "samples_seen": 4211,
     "restarts": 1,
-    "last_restart_at": "2026-08-01T16:23:34Z",
+    "last_restart_at": "2026-08-01T16:23:34-07:00",
     "last_exit": {
       "code": 1,
       "reason": "25 consecutive failed samples - the car has left the conversation. Log kept: runs/2026-08-01-drive.csv"
     },
     "feed_pid": 8412,
-    "supervisor_started_at": "2026-08-01T16:23:34Z",
-    "supervisor_uptime_s": 3021
+    "supervisor_started_at": "2026-08-01T16:23:34-07:00",
+    "supervisor_uptime_s": 3021,
+    "supervisor": {
+      "stall_seconds": 10.0,
+      "stall_restart_seconds": 45.0,
+      "status_interval": 1.0,
+      "mode": "live",
+      "gps_fix_age_seconds": 30.0
+    }
   },
   "gps": {
     "state": "CRAWLING",
     "healthy": true,
     "summary": "The GPS has a fix and the car is parked or crawling.",
     "detail": {
-      "state_since": "2026-08-01T16:22:51Z",
+      "state_since": "2026-08-01T16:22:51-07:00",
       "seconds_in_state": 43,
-      "last_line_at": "2026-08-01T16:23:34Z",
+      "last_line_at": "2026-08-01T16:23:34-07:00",
       "seconds_since_line": 0.3,
       "lines_seen": 3020,
       "fix": {

@@ -436,8 +436,11 @@ ports down once, `--gps` is the whole instruction. Anything that must ride
 the command line instead goes in one quoted string:
 `--gps-args "--replay runs\gps-last.txt"`. (Split on spaces, no quoting
 inside — a Windows path with a backslash has to survive, and anything
-fancier belongs in `config.json` anyway. `"supervisor": {"gps": true}` there
-turns the leg on permanently.)
+fancier belongs in `config.json` anyway. A lone flag wants the `=` form,
+`--gps-args=--list-ports`, or argparse reads it as one of the supervisor's
+own options. `"supervisor": {"gps": true}` in `config.json` turns the leg
+on permanently. And close any overlay you started by hand first — two of
+them fight over port 8765, and the supervisor's copy loses politely.)
 
 ### What it does
 
