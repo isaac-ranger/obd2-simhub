@@ -1,8 +1,18 @@
 # obd2-simhub
 
-Feed **real-car telemetry** (RPM, speed, throttle, temps, gear …) from an OBD2
-Bluetooth adapter into **[SimHub](https://www.simhubdash.com/)**, so its gauges,
-dashboards, and stream overlays run off a real vehicle instead of a game.
+Get the **truth off a real car and onto a screen** — while somebody drives it.
+Two legs, two devices, one repo:
+
+* **OBD2 → SimHub.** RPM, speed, throttle, temps, gear (learned, not
+  transcribed) from a Bluetooth OBD2 adapter into
+  **[SimHub](https://www.simhubdash.com/)**, so its gauges, dashboards and
+  stream overlays run off the car instead of a game.
+* **GPS → browser overlay.** A 10 Hz XGPS160 into an ego-centred trail map
+  in Chrome or an OBS browser source — no SimHub anywhere in the path.
+
+SimHub is one consumer of the car; the overlay is another. The name on the
+door still says the first leg only; the contents stopped agreeing with it a
+while ago, and this README is written for what's actually inside.
 
 ```
  ┌─────────┐  Bluetooth SPP   ┌──────────────────┐   UDP (binary feed)   ┌────────┐
@@ -10,11 +20,34 @@ dashboards, and stream overlays run off a real vehicle instead of a game.
  │ OBD2    │   virtual COM    │  polls PIDs,     │   External Sim        │ dashes │
  │ port    │   port           │  decodes, sends  │   Integration         │overlays│
  └─────────┘                  └──────────────────┘   (.simdef contract)  └────────┘
+ ┌─────────┐  Bluetooth SPP   ┌──────────────────┐   HTTP: /live + page  ┌────────┐
+ │ XGPS160 │ ───────────────► │  gps_overlay.py  │ ────────────────────► │ Chrome │
+ │ 10 Hz   │   virtual COM    │  keeps last fix, │   ego-centred trail,  │  / OBS │
+ │ NMEA    │   port           │  serves overlay  │   optional map tiles  │ source │
+ └─────────┘                  └──────────────────┘                       └────────┘
 ```
 
-Built and proven on a **2025 718 Cayman GTS 4.0** with an **OBDLink MX+**, but
-nothing here is Porsche-specific — any ELM327/STN-compatible adapter on any
-CAN car should work, and step 1 tells you what *your* car actually gives you.
+Built and proven on a **2025 718 Cayman GTS 4.0** with an **OBDLink MX+** and
+a **Dual XGPS160**, but nothing here is Porsche-specific — any ELM327/STN-
+compatible adapter on any CAN car should work, any NMEA-over-SPP receiver
+should feed the overlay, and each leg's first step tells you what *your*
+hardware actually gives you.
+
+## The two legs, and how each one proves itself
+
+The thing that makes a repo runnable by someone else isn't more prose; it's
+a path from *I have the hardware* to *I know it works*. Each leg has one.
+
+| leg | the path | the proof step |
+|---|---|---|
+| **OBD2** (steps 1–5 below) | probe → learn your gearbox → point SimHub at it → run the feed → run the supervisor | **Step 1**: `py probe\obd_probe.py --port COM3` prints what your car advertises and how fast it answers. If that table appears, the adapter is talking to the car and not just to itself. |
+| **GPS** ([`gps/`](gps/README.md)) | capture → verify the capture → run the overlay | `py gps\gps_capture.py COM5 60`, then `py gps\gps_verify.py xgps160-capture.txt --expect stationary` (parked) or `--expect drive`. The exit code is the verdict: a parked capture that claims motion, or a drive that goes nowhere, fails before any map is drawn — and the report never prints a coordinate, so it's safe to paste into a mail. |
+
+The legs are separate processes and share nothing at runtime; what they
+share is the config file, the two-COM-ports-pick-the-outgoing-one ritual,
+and a project that wants both on the same screen. Everything from *What
+you need* down is the OBD2 ladder as it always was; the GPS leg's own
+lab-notebook lives in [`gps/README.md`](gps/README.md), numbers and all.
 
 ---
 
@@ -23,6 +56,7 @@ CAN car should work, and step 1 tells you what *your* car actually gives you.
 | | |
 |---|---|
 | **Adapter** | OBDLink MX+ (what this was built on), or any ELM327/STN-compatible OBD2 Bluetooth adapter |
+| **GPS** (optional — the overlay leg only) | Dual XGPS160, or any receiver that talks NMEA over Bluetooth SPP. Skip it and nothing else here notices |
 | **PC** | Windows, with Bluetooth |
 | **Python** | 3.11+ recommended ([python.org](https://www.python.org/downloads/) — tick *Add python.exe to PATH*). 3.9/3.10 work, slightly less smoothly |
 | **SimHub** | **9.11.5 or newer** — External Sim Integration is beta and arrived in that release |
@@ -52,7 +86,12 @@ That's the only dependency.
    py probe\obd_probe.py --list-ports
    ```
 
-Everything below uses `COM3` as the example. Substitute yours.
+The XGPS160 pairs the same way and also makes two ports; `py gps\gps_overlay.py
+--list-ports` names the Bluetooth peer next to each, so the outgoing GPS is
+visible beside the listen-only half of its pair (and beside the OBD adapter's).
+
+Everything below uses `COM3` as the example for the adapter, `COM5` for the
+GPS. Substitute yours.
 
 ## Write it down once: config.json
 
@@ -406,6 +445,12 @@ power-cycle the adapter for you — but it never stops trying, so when you *do*
 pull and replug the MX+, the feed comes back on its own and you never touch the
 keyboard.
 
+Today it watches the OBD feed only. `gps_overlay.py` now prints the same kind
+of once-a-second line (`  t    12s  GPS ok       age   0.1s  speed  45.2 km/h …`, read from the same state
+`/live` serves), so a supervisor *can* watch that leg; teaching this one to
+hold both children — with a different policy for each, because a GPS that says
+`LOST` is reporting, not wedged — is the next step, not this one.
+
 ### The status file
 
 `status/obd2_status.json`, rewritten atomically once a second, carrying a
@@ -494,6 +539,11 @@ probe/         obd_probe.py     step 1 — survey + drive logging
 extractor/     obd_feed.py      step 4 — the live feed
                fake_car.py      a car-shaped thing for desk testing
 supervisor/    supervisor.py    step 5 — keeps the feed alive
+gps/           gps_capture.py   the GPS leg: listening post (timestamped NMEA)
+               gps_verify.py    the proof step — health report, never a coordinate
+               gps_overlay.py   live fix + /live + the browser overlay server
+               overlay/         the page (index.html, overlay.js) and its node bench
+               README.md        the leg's own notes, with the measured numbers
 simdef/        the SimHub contract
 calibration.json                your car: gears, tires, tank, throttle, units
 config.example.json             copy to config.json: your rig (port, baud)
@@ -510,6 +560,12 @@ why learn gear ratios instead of tabling them), the SimHub contract details,
 CAN-bus research notes, and what standard OBD2 can and can't give you. Also
 several corrections this project made to its own earlier guesses, kept on
 purpose.
+
+**[gps/README.md](gps/README.md)** — the GPS leg end to end: what four real
+captures measured about the XGPS160 (10 Hz is position only; 26,104
+sentences, zero checksum failures; a parked receiver pins its own position),
+the capture and verify tools, and the overlay — its URL knobs, the crawl
+hold, the trail clock, the tiles, and the status line.
 
 ## License
 

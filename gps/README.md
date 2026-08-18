@@ -40,7 +40,7 @@ listening post or into `obd_feed`. Capture stays dumb on purpose.
 
 ## Capture
 
-Install the one dependency, if the MZX+ work didn't already:
+Install the one dependency, if the MX+ work didn't already:
 
 ```
 py -m pip install pyserial
