@@ -267,6 +267,33 @@ py gps\gps_overlay.py --port COM5 --run-log full
 py gps\gps_overlay.py --replay runs\gps-last.txt
 ```
 
+Once it is up, the terminal gets one status line a second — the same
+shape as the OBD feed's `t NNNs` line, so two windows side by side read
+as one instrument:
+
+```
+  t    12s  GPS ok       age   0.1s  speed  45.2 km/h  crawl no   sats  9  acc  3.1 m
+  t   140s  GPS LOST     age  27.4s  speed  45.2 km/h  crawl no   sats  9  acc  3.1 m  (signal lost: ClearCommError)
+```
+
+Every field is read from the same snapshot `/live` serves — the age is
+now minus the fix's own stamp, `crawl` is the published field, `ok` /
+`LOST` / `waiting` is `ok` plus `reason` — not from a counter kept
+beside it, for the same reason the page reads `crawl` instead of
+guessing: one authority for whether the GPS is alive. The line never
+goes quiet on purpose. A dropped receiver prints `LOST` with the reason
+and an age that keeps climbing; a silent port that never raises prints
+`ok` with an age in minutes, which is the true state of affairs. That is
+the whole point of it: the supervisor's liveness rule is "the child
+printed a line this second, so data moved," and until now this process
+printed a banner and then nothing for hours while working perfectly —
+point the supervisor at it and it would have read STALLED forever about
+a process doing its job. The line is the prerequisite; teaching the
+supervisor to watch both legs is the next step, and it will read the
+age and `LOST` off this line rather than punishing quiet. There is no
+flag to turn it off, also on purpose — a config knob is a place for the
+supervisor to lose its signal.
+
 `config.json` (overlay only — capture has no argparse, so it has no
 config section):
 
@@ -302,9 +329,12 @@ returns, and the rule that an empty read on a timeout'd port is a quiet
 quarter-second, not a goodbye. The nmea and live-state suites
 cover the overlay's RMC/GGA parser, the live-fix smoother, the
 `crawl` field it publishes (both sides of the 2 km/h line, and that it
-is the same decision that freezes the EMA, not a twin), and the
+is the same decision that freezes the EMA, not a twin), the
 dropout door: a raised read marks the last pose lost, an empty timeout
-does not. The verify suite proves the health checker's controls
+does not — and the status line: every field from the `/live` snapshot
+(a mutant ticker keeping its own last-fix stamp cannot print the ages
+the tests ask for), one line per interval rather than per fix, `LOST`
+with the reason once the source is gone, and still printing after it. The verify suite proves the health checker's controls
 actually discriminate — its synthetic stationary capture must fail the
 drive claim and vice versa — and that its report keeps the
 no-coordinates promise.

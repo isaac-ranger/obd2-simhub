@@ -19,6 +19,11 @@ Then open http://127.0.0.1:8765/  (optional ?meters=200)
 Live serial runs also leave replay-ready raw NMEA in runs/gps-last.txt by
 default. Use --run-log full to keep a timestamped run, or off to disable it.
 
+Once running, stdout carries one status line per second — the same shape
+as the OBD feed's — read from the same state /live serves (fix age, speed,
+crawl, ok / LOST / waiting). It never goes quiet: a lost or missing source
+prints too, with the age climbing. That line is what a supervisor watches.
+
 Requires: python 3.9+, pyserial for a COM port (replay is stdlib only).
 The live door is gps_capture.open_source — same two-door rule as capture.
 """
@@ -248,7 +253,8 @@ class LiveState:
     reads it here instead of comparing speed against a constant of its own.
     """
 
-    def __init__(self):
+    def __init__(self, clock=time.time):
+        self._clock = clock
         self._lock = threading.Lock()
         self._fix = {
             "ok": False,
@@ -319,7 +325,7 @@ class LiveState:
                 "crawl": crawl,
                 "accuracy_m": self._accuracy_m,
                 "sats": self._sats,
-                "t": time.time(),
+                "t": self._clock(),
                 "source": source,
                 "reason": None,
             }
@@ -340,6 +346,64 @@ class LiveState:
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._fix)
+
+
+# The status line is the same shape as the OBD feed's ("  t    12s  RPM ...")
+# so two paddock terminals line up, and so a supervisor that keys on the
+# leading "t NNNs" column has one more token to look at, not a new grammar.
+STATUS_INTERVAL_S = 1.0
+
+
+def status_line(snap: dict, now: float, uptime_s: float) -> str:
+    """One greppable line from a /live snapshot. Every data field on it is
+    read from the snapshot: fix age is now minus the fix's own stamp, speed
+    and crawl are the published values, ok/LOST/waiting is ok plus reason.
+    Nothing here counts fixes or remembers the last one it saw — a ticker
+    that did would be a second opinion about whether the GPS is alive, and
+    that is what the supervisor was going to read.
+
+    ok       — the last RMC was valid and the source has not hung up.
+    LOST     — the reader marked it (dropout / EOF); the reason rides along.
+    waiting  — no fix yet this run and no goodbye either.
+    The age keeps climbing in every state; a silent port that never raises
+    shows as ok with an age of minutes, which is the honest thing to show.
+    """
+    if snap.get("ok"):
+        status = "ok"
+    elif snap.get("reason"):
+        status = "LOST"
+    else:
+        status = "waiting"
+    t = snap.get("t") or 0.0
+    age = f"{now - t:5.1f}s" if t else "     -"
+    speed = float(snap.get("speed_kmh") or 0.0)
+    crawl = snap.get("crawl")
+    crawl_s = "-" if crawl is None else ("yes" if crawl else "no")
+    sats = snap.get("sats")
+    sats_s = " -" if sats is None else f"{int(sats):2d}"
+    acc = snap.get("accuracy_m")
+    acc_s = "  -" if acc is None else f"{float(acc):4.1f}"
+    reason = snap.get("reason")
+    tail = f"  ({reason})" if reason else ""
+    return (f"  t {uptime_s:5.0f}s  GPS {status:<7}  age {age}  "
+            f"speed {speed:5.1f} km/h  crawl {crawl_s:<3}  sats {sats_s}  "
+            f"acc {acc_s} m{tail}")
+
+
+def status_ticker(state: LiveState, stop: threading.Event, out=None,
+                  interval: float = STATUS_INTERVAL_S, wall=time.time,
+                  mono=time.monotonic):
+    """Print status_line once per interval until stop, from state.snapshot().
+
+    Rate is the interval, not the fix rate: ten fixes a second is one line,
+    and zero fixes a second is also one line — that one says so. The
+    supervisor punishes silence, so this never goes quiet on purpose.
+    """
+    out = sys.stdout if out is None else out
+    t0 = mono()
+    while not stop.wait(interval):
+        print(status_line(state.snapshot(), wall(), mono() - t0),
+              file=out, flush=True)
 
 
 def make_handler(state: LiveState, static_dir: str):
@@ -558,6 +622,9 @@ def main(argv=None):
         sys.exit(f"cannot bind http://{args.http_host}:{args.http_port}/: {e}")
 
     worker.start()
+    ticker = threading.Thread(target=status_ticker, args=(state, stop),
+                              daemon=True)
+    ticker.start()
 
     url = f"http://{args.http_host}:{args.http_port}/"
     print(f"Overlay  -> {url}", flush=True)
@@ -578,6 +645,7 @@ def main(argv=None):
         stop.set()
         httpd.server_close()
         worker.join(timeout=1.0)
+        ticker.join(timeout=STATUS_INTERVAL_S + 0.5)
         if run_log is not None:
             print(run_log.kept(), flush=True)
             run_log.close()

@@ -5,11 +5,13 @@ import os
 import sys
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gps_overlay import CRAWL_KMH, GpsRunLog, LiveState, reader_serial
-from nmea import parse_rmc
+from gps_overlay import (CRAWL_KMH, GpsRunLog, LiveState, reader_serial,
+                         status_line, status_ticker)
+from nmea import parse_gga, parse_rmc
 
 FAILED = []
 
@@ -310,6 +312,116 @@ ok("reader: a file-door EOF marks the fix lost",
    and eof_state.snapshot()["reason"] == "signal lost: source closed"
    and eof_state.snapshot()["lat"] is not None,
    f"{eof_state.snapshot()}")
+
+# The status line: one per second on stdout, for a human in the paddock and
+# for the supervisor, whose liveness rule is "the child printed a line this
+# second". Every data field on it must come from the SAME snapshot /live
+# serves. A ticker keeping its own fix counter or last-fix stamp is a second
+# opinion about whether the GPS is alive; these tests are built to catch one.
+class WallClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def gga(sats, hdop):
+    body = (f"$GPGGA,120000.000,3248.6613,N,11715.0748,W,1,{sats:02d},{hdop},"
+            f"15.0,M,,M,,")
+    x = 0
+    for ch in body[1:]:
+        x ^= ord(ch)
+    return parse_gga(body + "*%02X" % x)
+
+
+wall = WallClock(1000.0)
+sl = LiveState(clock=wall)
+line0 = status_line(sl.snapshot(), now=1003.0, uptime_s=3.0)
+ok("status: before the first fix the line still prints, and says waiting",
+   line0.startswith("  t     3s  GPS waiting") and "age      -" in line0, line0)
+ok("status: no fix means no crawl opinion (- not no)",
+   "crawl -" in line0, line0)
+ok("status: greppable columns share the feed's leading t-column shape",
+   line0.split()[:2] == ["t", "3s"], line0)
+
+# The age is now minus the fix's OWN stamp: the ticker never saw an update
+# event here, only the state — a mutant that timestamps updates it observes
+# cannot print 12.5 from a fix it did not witness.
+sl.update_rmc(rmc("3248.6613", "11715.0748", "24.5", "187.0"), source="COM5")
+sl.update_gga(gga(9, "1.2"))
+sl.update_rmc(rmc("3248.6613", "11715.0748", "24.5", "187.0"), source="COM5")
+line1 = status_line(sl.snapshot(), now=1012.5, uptime_s=17.0)
+ok("status: ok state names itself", "GPS ok" in line1, line1)
+ok("status: age is now minus the fix's own stamp (12.5 s here)",
+   "age  12.5s" in line1, line1)
+ok("status: speed is the published speed_kmh, one decimal",
+   "speed  45.4 km/h" in line1, line1)
+ok("status: crawl no while moving, sats and accuracy from the same snapshot",
+   "crawl no " in line1 and "sats  9" in line1 and "acc  6.0 m" in line1,
+   line1)
+ok("status: no reason means no trailing parenthesis",
+   not line1.rstrip().endswith(")"), line1)
+
+# ok:false shows in the line, with the reason, and the age keeps climbing.
+sl.mark_lost("signal lost: ClearCommError")
+lost1 = status_line(sl.snapshot(), now=1012.5, uptime_s=17.0)
+lost2 = status_line(sl.snapshot(), now=1131.7, uptime_s=136.0)
+ok("status: a dropout prints LOST, not ok", "GPS LOST" in lost1
+   and "GPS ok" not in lost1, lost1)
+ok("status: the reason rides on the line",
+   lost1.endswith("(signal lost: ClearCommError)"), lost1)
+ok("status: LOST keeps the last speed on the line, like /live keeps the pose",
+   "speed  45.4 km/h" in lost1, lost1)
+ok("status: after the loss the age keeps climbing (silence is not quiet)",
+   "age 131.7s" in lost2, lost2)
+
+# A goodbye before any fix (source closes on the first read) is LOST too —
+# reason is the authority, not the stamp.
+early = LiveState(clock=wall)
+early.mark_lost("signal lost: source closed")
+line_e = status_line(early.snapshot(), now=1002.0, uptime_s=2.0)
+ok("status: lost before the first fix says LOST with no age",
+   "GPS LOST" in line_e and "age      -" in line_e, line_e)
+
+# The ticker: rate is the interval, not the fix rate. 200 fixes in a burst
+# during a short window must yield a handful of lines, not 200 — and each
+# line is read from the state at tick time, so a change made by another
+# thread with no signal to the ticker shows on the next line.
+tick_state = LiveState()
+tick_stop = threading.Event()
+tick_out = io.StringIO()
+tick_thread = threading.Thread(
+    target=status_ticker,
+    args=(tick_state, tick_stop, tick_out, 0.02), daemon=True)
+tick_thread.start()
+fast = rmc("3248.6613", "11715.0748", "3.0", "0.0")      # 5.6 km/h
+for _ in range(200):
+    tick_state.update_rmc(fast)
+time.sleep(0.15)
+tick_state.update_rmc(rmc("3248.6700", "11715.0748", "30.0", "0.0"))  # 55.6
+time.sleep(0.15)
+tick_state.mark_lost("signal lost: bench")
+time.sleep(0.15)
+tick_stop.set()
+tick_thread.join(timeout=2.0)
+tick_lines = tick_out.getvalue().splitlines()
+n_lines = len(tick_lines)
+ok("ticker: rate is per interval, not per fix (200 fixes, a handful of lines)",
+   3 <= n_lines <= 60, f"{n_lines} lines")
+ok("ticker: every line is a status line",
+   all(ln.startswith("  t ") and " GPS " in ln for ln in tick_lines),
+   f"{tick_lines[:2]}")
+ok("ticker: an update it was never told about shows on a later line",
+   any("speed   5.6 km/h" in ln for ln in tick_lines)
+   and any("speed  55.6 km/h" in ln for ln in tick_lines),
+   f"{tick_lines}")
+ok("ticker: a dropout it was never told about shows as LOST",
+   any("GPS LOST" in ln and "(signal lost: bench)" in ln for ln in tick_lines),
+   f"{tick_lines[-3:]}")
+ok("ticker: after the drop it keeps printing (silence is what gets punished)",
+   sum("GPS LOST" in ln for ln in tick_lines) >= 2, f"{tick_lines[-4:]}")
+ok("ticker: stop ends it", not tick_thread.is_alive())
 
 print()
 if FAILED:
