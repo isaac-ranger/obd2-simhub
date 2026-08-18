@@ -2,7 +2,8 @@
 
 `supervisor.py` writes **`obd2_status.json`** here, once a second, for as long
 as it is running. It is the one place anything else should look to find out
-whether the car is actually talking to SimHub.
+whether the car is actually talking to SimHub — and, when the supervisor is
+run with `--gps`, whether the GPS overlay has a fix.
 
 The file is written atomically (temp file, then rename), so a reader can open
 it at any instant and never catch a half-written document. Read it as often as
@@ -44,14 +45,24 @@ no jargon, and no numbers that need reading off a screen — drop it straight in
 her context and she can answer "how's the car doing?" without anything else
 from this file. Everything under `detail` is there if she needs to be precise.
 
+With one leg it is the sentence it has always been: *The car is talking to
+SimHub and data has been flowing for 47 minutes.* With `--gps` it is one
+sentence about both, shortest form first: *OBD live for 47 minutes, GPS
+crawling.* — or *OBD live for 47 minutes, GPS lost for 2 minutes.*, or *OBD
+reconnecting (attempt 3), GPS live.* Each leg's own longer sentence lives on
+in `gps.summary` (the GPS) — the OBD leg's is what the whole file used to say
+and its parts are all in `detail`.
+
 `healthy` is the quick boolean: `true` only when data is genuinely flowing.
+It is the **OBD leg's** boolean, then and now; the GPS leg has its own at
+`gps.healthy` (`true` in `LIVE` and `CRAWLING`).
 
 ## Fields
 
 | field | meaning |
 |---|---|
 | `schema` | format version — currently `1`. Will only ever grow by adding fields. |
-| `state` | `STARTING` · `LIVE` · `STALLED` · `RECONNECTING` · `NO_ADAPTER` · `STOPPED` |
+| `state` | `STARTING` · `LIVE` · `STALLED` · `RECONNECTING` · `NO_ADAPTER` · `STOPPED` — the OBD leg's state, then and now |
 | `healthy` | `true` only in `LIVE` |
 | `summary` | one speakable sentence |
 | `updated_at` / `updated_unix` | when this file was last written (UTC) |
@@ -63,6 +74,12 @@ from this file. Everything under `detail` is there if she needs to be precise.
 | `detail.last_exit` | `{code, reason}` — the feed's own words on the way out |
 | `detail.feed_pid` | pid of the running feed, `null` when nothing is running |
 | `detail.supervisor_uptime_s` | how long the supervisor has been up |
+| `legs` | which children this supervisor is running: `["obd"]` or `["obd", "gps"]` |
+| `gps` | present only with `--gps`: the GPS leg's own stanza — `state`, `healthy`, `summary`, `detail` |
+| `gps.state` | `STARTING` · `LIVE` · `CRAWLING` · `WAITING` · `LOST` · `STALLED` · `RECONNECTING` · `NO_ADAPTER` · `STOPPED` |
+| `gps.detail.fix` | what the overlay's last status line said: `status` (`ok`/`LOST`/`waiting`), `age_s`, `speed_kmh`, `crawl`, `sats`, `accuracy_m`, `reason` |
+| `gps.detail.seconds_since_line` | how long since the overlay last printed a status line — its pulse |
+| `gps.detail.lines_seen` / `restarts` / `last_exit` / `pid` | as for the OBD leg |
 
 ## What the states mean, and what to do about each
 
@@ -78,6 +95,20 @@ from this file. Everything under `detail` is there if she needs to be precise.
 The important row is `NO_ADAPTER`. The supervisor cannot power-cycle the
 adapter for you, but it never stops trying — so when you do pull and replug it,
 the feed comes back on its own and you never touch the keyboard.
+
+### The GPS leg's states
+
+Same words where they mean the same thing (`STARTING`, `STALLED`,
+`RECONNECTING`, `NO_ADAPTER`, `STOPPED`). The live ones come from *reading*
+the overlay's status line, not from the fact that it printed one:
+
+| state | what happened | what you do |
+|---|---|---|
+| `LIVE` | fix is fresh, car is moving | nothing |
+| `CRAWLING` | fix is fresh, car is parked or creeping (the overlay's own `crawl` field) | nothing — parked is not broken |
+| `WAITING` | overlay is up, no fix yet this run | give the receiver a view of the sky |
+| `LOST` | the overlay says the receiver is gone (its reason is in `gps.summary`), **or** it says `ok` about a fix older than `--gps-fix-age-seconds` — the port went quiet without saying so | check the XGPS is on and paired; the overlay recovers by itself and is **not** restarted for this |
+| `STALLED` | no status line at all — the overlay is up but silent | nothing; past `--stall-restart-seconds` the supervisor kills and restarts it, because silence is the one thing that means wedged |
 
 ## Example
 

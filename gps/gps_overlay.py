@@ -22,9 +22,10 @@ default. Use --run-log full to keep a timestamped run, or off to disable it.
 Once running, stdout carries one status line per second — the same shape
 as the OBD feed's — read from the same state /live serves (fix age, speed,
 crawl, ok / LOST / waiting). It never goes quiet: a lost or missing source
-prints too, with the age climbing. That line is what a supervisor will
-watch — today's supervisor keys on the OBD feed's RPM column and does not
-read this one yet; teaching it the GPS leg is the next step.
+prints too, with the age climbing. That line is what the supervisor watches
+(supervisor.py --gps): any line is the pulse, the fields are the health, and
+LOST is believed rather than punished — only silence gets this process
+restarted.
 
 Requires: python 3.9+, pyserial for a COM port (replay is stdlib only).
 The live door is gps_capture.open_source — same two-door rule as capture.

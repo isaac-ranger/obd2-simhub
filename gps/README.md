@@ -288,10 +288,12 @@ the whole point of it: the supervisor's liveness rule is "the child
 printed a line this second, so data moved," and until now this process
 printed a banner and then nothing for hours while working perfectly —
 point the supervisor at it and it would have read STALLED forever about
-a process doing its job. The line is the prerequisite; teaching the
-supervisor to watch both legs is the next step, and it will read the
-age and `LOST` off this line rather than punishing quiet. There is no
-flag to turn it off, also on purpose — a config knob is a place for the
+a process doing its job. The line is the prerequisite, and the supervisor
+now reads it: `py supervisor\supervisor.py --gps -- --port COM3` runs both
+legs in one window, reads the age and `LOST` off this line, and never
+punishes quiet that the line explains — it restarts the overlay only if it
+exits or prints nothing at all (root README, *Step 5*). There is no flag to
+turn the line off, also on purpose — a config knob is a place for the
 supervisor to lose its signal.
 
 `config.json` (overlay only — capture has no argparse, so it has no

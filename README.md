@@ -425,10 +425,19 @@ that matters at an event.
 
 ```
 py supervisor\supervisor.py -- --port COM3
+py supervisor\supervisor.py --gps -- --port COM3      (both legs, one window)
 ```
 
 Everything after `--` is passed to `obd_feed.py` untouched, so every flag the
-feed has works here unchanged.
+feed has works here unchanged. `--gps` adds `gps_overlay.py` as a second
+child; it reads its own port from `config.json`'s `gps_overlay` section, the
+same way it does when you run it by hand, so on a rig that has written its
+ports down once, `--gps` is the whole instruction. Anything that must ride
+the command line instead goes in one quoted string:
+`--gps-args "--replay runs\gps-last.txt"`. (Split on spaces, no quoting
+inside — a Windows path with a backslash has to survive, and anything
+fancier belongs in `config.json` anyway. `"supervisor": {"gps": true}` there
+turns the leg on permanently.)
 
 ### What it does
 
@@ -449,17 +458,41 @@ power-cycle the adapter for you — but it never stops trying, so when you *do*
 pull and replug the MX+, the feed comes back on its own and you never touch the
 keyboard.
 
-Today it watches the OBD feed only. `gps_overlay.py` now prints the same kind
-of once-a-second line (`  t    12s  GPS ok       age   0.1s  speed  45.2 km/h …`, read from the same state
-`/live` serves), so a supervisor *can* watch that leg; teaching this one to
-hold both children — with a different policy for each, because a GPS that says
-`LOST` is reporting, not wedged — is the next step, not this one.
+### The GPS leg is a different animal
+
+`gps_overlay.py` prints the same kind of once-a-second line (`  t    12s  GPS
+ok       age   0.1s  speed  45.2 km/h  crawl no …`, read from the same state
+`/live` serves) — and it prints it *even when the receiver is gone*, saying
+`LOST` and why. So the supervisor treats that child differently, on purpose:
+its pulse is "it printed a status line at all", and the **content** of the
+line is the health. Same `--stall-seconds` / `--stall-restart-seconds`
+numbers, different definition of quiet:
+
+| the GPS line says | the leg reads | what the supervisor does |
+|---|---|---|
+| `ok`, fresh fix, `crawl no` | `LIVE` | nothing |
+| `ok`, fresh fix, `crawl yes` | `CRAWLING` | nothing — parked is not broken |
+| `waiting` | `WAITING` | nothing — give the receiver some sky |
+| `LOST (reason)` | `LOST` | **nothing.** The receiver wandered off or napped; the process noticed, said so, and will pick it back up itself |
+| `ok` about a fix older than `--gps-fix-age-seconds` (30) | `LOST` | nothing — the port went quiet without saying so; the age is the tell |
+| *nothing at all* past `--stall-seconds` | `STALLED` | past `--stall-restart-seconds`, kills and restarts it — the ticker fails loud on a dead stdout, so silence is the one shape that means wedged |
+| the process exits | `RECONNECTING` / `NO_ADAPTER` | restarts it after a backoff, like the feed |
+
+In one breath: **the MX+ gets killed for wedging, and the GPS gets believed
+when it says `LOST`.** Killing the overlay for correctly reporting a receiver
+that went out of range would be the supervisor's own driveway bug, and we
+have done that one already.
 
 ### The status file
 
 `status/obd2_status.json`, rewritten atomically once a second, carrying a
 plain-English `summary` sentence meant to drop straight into a voice
-assistant's context.
+assistant's context. With `--gps` the file grows a `gps` stanza and the
+sentence covers both legs — `OBD live for 12 minutes, GPS crawling.` — because
+PitGirl reads a sentence, not a schema. Every top-level key keeps its
+single-leg meaning (`state`, `healthy`, `detail` are the OBD leg), so a reader
+written against last month's file keeps working; a `legs` list says which
+children are present.
 
 **The one rule for anything reading it:** check the clock. A dead supervisor
 leaves behind a file that still cheerfully says `LIVE`. Compare `updated_unix`

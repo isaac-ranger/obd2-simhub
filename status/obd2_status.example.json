@@ -2,10 +2,14 @@
   "schema": 1,
   "state": "LIVE",
   "healthy": true,
-  "summary": "The car is talking to SimHub and data has been flowing for 47 minutes. It recovered from 1 interruption along the way.",
+  "summary": "OBD live for 47 minutes, GPS crawling.",
   "updated_at": "2026-08-01T16:23:34Z",
   "updated_unix": 1785601414,
   "stale_after_s": 10,
+  "legs": [
+    "obd",
+    "gps"
+  ],
   "detail": {
     "mode": "live",
     "state_since": "2026-08-01T16:23:34Z",
@@ -22,5 +26,30 @@
     "feed_pid": 8412,
     "supervisor_started_at": "2026-08-01T16:23:34Z",
     "supervisor_uptime_s": 3021
+  },
+  "gps": {
+    "state": "CRAWLING",
+    "healthy": true,
+    "summary": "The GPS has a fix and the car is parked or crawling.",
+    "detail": {
+      "state_since": "2026-08-01T16:22:51Z",
+      "seconds_in_state": 43,
+      "last_line_at": "2026-08-01T16:23:34Z",
+      "seconds_since_line": 0.3,
+      "lines_seen": 3020,
+      "fix": {
+        "status": "ok",
+        "age_s": 0.1,
+        "speed_kmh": 0.8,
+        "crawl": true,
+        "sats": 10,
+        "accuracy_m": 2.4,
+        "reason": null
+      },
+      "restarts": 0,
+      "last_restart_at": null,
+      "last_exit": null,
+      "pid": 8420
+    }
   }
 }
