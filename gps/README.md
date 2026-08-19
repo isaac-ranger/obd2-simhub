@@ -197,8 +197,8 @@ per failure up to a minute and holds there, per tile, so a dropped tile
 on flaky LTE heals on the first ask while a wrong key or a dead link
 costs one request per tile per minute instead of a storm. The console
 says so once when the first tile reaches the minute, and once more when
-tiles load again. Toner and Terrain are light; `?bg=grey` is a better
-bench than `?bg=dark`.
+a tile that had been failing loads again. Toner and Terrain are light;
+`?bg=grey` is a better bench than `?bg=dark`.
 
 OBS sets pixel Width × Height; the page fills the window. Scale stays
 at the floor while the trail fits, eases out toward the cap when the
@@ -358,12 +358,12 @@ Node is a *test* dependency, full stop. The simhub, the capture tool and
 the overlay server run on Python and pyserial; the overlay page itself
 needs nothing but a browser. Node exists here only to run `overlay.js` on
 a bench, with a small shim standing in for the window, and if you skip
-installing it you lose these 80 checks and nothing else — nothing that
+installing it you lose these 81 checks and nothing else — nothing that
 drives, records or draws depends on it. Any node from the last few years
 will do (written against 22; it uses node's standard library and nothing
 from npm): install from nodejs.org, make sure `node --version` answers
 from a fresh terminal, run the line above from the repo root. A pass
-ends with a line like `all 80 checks passed` and exits 0. A failing
+ends with a line like `all 81 checks passed` and exits 0. A failing
 check prints `FAIL`, the check's name and what it actually saw, and
 exits 1. Exit 2 means the file could not load `overlay.js` at all —
 that is the bench's coupling to the IIFE wrapper, not a trail bug, and

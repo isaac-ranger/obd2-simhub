@@ -308,7 +308,7 @@
       tileFailWarned = true;
       console.warn("map tile failed to load; on 127.0.0.1 try without a key, or add ?stadiaKey=");
     }
-    if (!tileBackoffWarned && rec.retryAt - rec.failedAt >= TILE_FAIL_RETRY_MAX_MS) {
+    if (!tileBackoffWarned && tileRetryDelay(rec.fails) >= TILE_FAIL_RETRY_MAX_MS) {
       tileBackoffWarned = true;
       console.warn("map tiles: one has now failed " + rec.fails + " times in a row; that is not a dropped tile. " +
                    "Retries slow to once a minute per tile until a tile loads. If tiles 401, fix ?stadiaKey=; " +
@@ -317,9 +317,10 @@
   }
 
   function tileLoaded(rec) {
+    var recovered = rec.fails > 0;   // only a tile that HAD been failing means the link is back; a fresh tile loading beside a dead one does not
     rec.status = "ok";
     rec.fails = 0;
-    if (tileBackoffWarned) {
+    if (tileBackoffWarned && recovered) {
       tileBackoffWarned = false;
       console.warn("map tiles are loading again.");
     }

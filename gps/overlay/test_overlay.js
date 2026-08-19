@@ -385,13 +385,17 @@ async function main() {
     ok("backoff (browser path): the fifth failure reaches the minute, five Images asked, one line said",
        cur.fails === 5 && cur.retryAt - cur.failedAt === 60000 && images.length === 5 && live.warns.length === 2,
        JSON.stringify({ fails: cur.fails, images: images.length, warns: live.warns }));
+    const fresh = live.api.getTile(3, 9, 9);
+    images[images.length - 1].onload();
+    ok("backoff (browser path): a tile that never failed loading beside the dead one is not 'loading again'",
+       fresh.status === "ok" && live.warns.length === 2, JSON.stringify(live.warns));
     live.tick(60000);
     cur = live.api.getTile(3, 1, 1);
     images[images.length - 1].onload();
-    ok("backoff (browser path): a load after the ceiling says the tiles are back, once, and clears the count",
+    ok("backoff (browser path): a load of the tile that HAD been failing says the tiles are back, once, and clears the count",
        cur.status === "ok" && cur.fails === 0 && live.warns.length === 3 && /loading again/.test(live.warns[2]),
        JSON.stringify({ status: cur.status, fails: cur.fails, warns: live.warns }));
-    ok("backoff (browser path): a loaded tile stays loaded", live.api.getTile(3, 1, 1) === cur && images.length === 6,
+    ok("backoff (browser path): a loaded tile stays loaded", live.api.getTile(3, 1, 1) === cur && images.length === 7,
        "images=" + images.length);
     let again = live.api.getTile(3, 2, 2);
     for (let i = 0; i < 5; i++) {
