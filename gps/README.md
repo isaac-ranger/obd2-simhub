@@ -191,8 +191,14 @@ milliseconds (default 1200). `?headingTau=0` or `off` is the old
 glued-arrow behaviour. The default URL stays transparent for OBS. Lock
 the scale (`?meters=200&metersMax=200`) if you want a fixed zoom. If
 tiles 401, add `?stadiaKey=` from the dashboard; do not put the key in a
-tracked file. Toner and Terrain are light; `?bg=grey` is a better bench
-than `?bg=dark`.
+tracked file. A tile that fails to load is a hole, not a life sentence:
+it is asked for again after 4 s, and if it keeps failing the wait doubles
+per failure up to a minute and holds there, per tile, so a dropped tile
+on flaky LTE heals on the first ask while a wrong key or a dead link
+costs one request per tile per minute instead of a storm. The console
+says so once when the first tile reaches the minute, and once more when
+tiles load again. Toner and Terrain are light; `?bg=grey` is a better
+bench than `?bg=dark`.
 
 OBS sets pixel Width × Height; the page fills the window. Scale stays
 at the floor while the trail fits, eases out toward the cap when the
@@ -352,12 +358,12 @@ Node is a *test* dependency, full stop. The simhub, the capture tool and
 the overlay server run on Python and pyserial; the overlay page itself
 needs nothing but a browser. Node exists here only to run `overlay.js` on
 a bench, with a small shim standing in for the window, and if you skip
-installing it you lose these 63 checks and nothing else — nothing that
+installing it you lose these 80 checks and nothing else — nothing that
 drives, records or draws depends on it. Any node from the last few years
 will do (written against 22; it uses node's standard library and nothing
 from npm): install from nodejs.org, make sure `node --version` answers
 from a fresh terminal, run the line above from the repo root. A pass
-ends with a line like `all 63 checks passed` and exits 0. A failing
+ends with a line like `all 80 checks passed` and exits 0. A failing
 check prints `FAIL`, the check's name and what it actually saw, and
 exits 1. Exit 2 means the file could not load `overlay.js` at all —
 that is the bench's coupling to the IIFE wrapper, not a trail bug, and
@@ -371,5 +377,8 @@ parked points age out by clock, not by being pushed off the front; a
 `crawl?`; the HUD prints `crawl` when the field says so; `poll()`
 hands the trail `data.crawl`, not the speed; `?map=` stays off unless
 asked; slippy-map math inverts at the equator; heading-up fetches
-the extra corner tiles a rotated view needs; and `?headingTau=` keeps a
-slow camera heading so the arrow, not the world, takes the COG jitter.
+the extra corner tiles a rotated view needs; a failed tile is re-asked
+after 4 s and a tile that keeps failing backs off, doubling to a minute
+and holding, per tile, with the console told once per outage; and
+`?headingTau=` keeps a slow camera heading so the arrow, not the world,
+takes the COG jitter.

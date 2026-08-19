@@ -102,6 +102,7 @@
   var TILE_MAX_Z = 20;
   var TILE_MAX_COUNT = 160;          // viewport plus pad, and √2 more when heading-up rotates the AABB
   var TILE_FAIL_RETRY_MS = 4000;     // a failed tile is a hole, not a life sentence
+  var TILE_FAIL_RETRY_MAX_MS = 60000; // ...but a hole that keeps failing is asked about less often: the 4 s doubles per failure up to this
   var EQUATOR_M = 40075016.686;      // WGS84 circumference, for mercator metres/pixel
   var TILE_HOST = "https://tiles.stadiamaps.com/tiles/";
   var MAP_STYLES = {
@@ -283,37 +284,69 @@
   }
 
   var tileCache = {};
-  var tileFailWarned = false;
+  var tileFailWarned = false;      // the first failure, once per page
+  var tileBackoffWarned = false;   // a tile at the retry ceiling, once per outage; re-armed by the next load
+
+  /* How long a tile that has failed `fails` times in a row waits before it
+     is asked for again: 4 s, 8 s, 16 s, 32 s, then a minute, forever. One
+     dropped tile on flaky LTE heals on the first ask, exactly as before; a
+     wrong key or a dead link converges to one ask per tile per minute
+     instead of one per tile per 4 s. Never a hard stop: on a lap course
+     the same tiles come round again, and a hole that gave up during a
+     dead patch would stay a hole for the rest of the session. */
+  function tileRetryDelay(fails) {
+    var ms = TILE_FAIL_RETRY_MS * Math.pow(2, fails > 1 ? fails - 1 : 0);
+    return ms < TILE_FAIL_RETRY_MAX_MS ? ms : TILE_FAIL_RETRY_MAX_MS;
+  }
+
+  function tileFailed(rec) {
+    rec.status = "fail";
+    rec.fails = (rec.fails || 0) + 1;
+    rec.failedAt = window.performance.now();
+    rec.retryAt = rec.failedAt + tileRetryDelay(rec.fails);
+    if (!tileFailWarned) {
+      tileFailWarned = true;
+      console.warn("map tile failed to load; on 127.0.0.1 try without a key, or add ?stadiaKey=");
+    }
+    if (!tileBackoffWarned && rec.retryAt - rec.failedAt >= TILE_FAIL_RETRY_MAX_MS) {
+      tileBackoffWarned = true;
+      console.warn("map tiles: one has now failed " + rec.fails + " times in a row; that is not a dropped tile. " +
+                   "Retries slow to once a minute per tile until a tile loads. If tiles 401, fix ?stadiaKey=; " +
+                   "if the link is down, the map heals itself when it comes back.");
+    }
+  }
+
+  function tileLoaded(rec) {
+    rec.status = "ok";
+    rec.fails = 0;
+    if (tileBackoffWarned) {
+      tileBackoffWarned = false;
+      console.warn("map tiles are loading again.");
+    }
+  }
 
   function getTile(z, x, y) {
     var k = (mapStyle ? mapStyle.slug : "") + "/" + z + "/" + x + "/" + y;
     var now = window.performance.now();
     var rec = tileCache[k];
+    var fails = 0;
     if (rec) {
-      if (rec.status === "fail") {
-        var age = (rec.failedAt != null) ? (now - rec.failedAt) : TILE_FAIL_RETRY_MS;
-        if (age < TILE_FAIL_RETRY_MS) return rec;
-        delete tileCache[k];
-      } else {
-        return rec;
-      }
+      if (rec.status !== "fail") return rec;
+      var retryAt = (rec.retryAt != null) ? rec.retryAt : now;
+      if (now < retryAt) return rec;
+      fails = rec.fails || 0;      // carried into the new record, so the next wait is longer than this one was
+      delete tileCache[k];
     }
-    if (typeof Image === "undefined") {
-      tileCache[k] = { status: "fail", failedAt: now };
-      return tileCache[k];
-    }
-    rec = { img: new Image(), status: "loading" };
-    rec.img.onload = function () { rec.status = "ok"; };
-    rec.img.onerror = function () {
-      rec.status = "fail";
-      rec.failedAt = window.performance.now();
-      if (!tileFailWarned) {
-        tileFailWarned = true;
-        console.warn("map tile failed to load; on 127.0.0.1 try without a key, or add ?stadiaKey=");
-      }
-    };
-    rec.img.src = tileUrl(z, x, y);
+    rec = { status: "loading", fails: fails };
     tileCache[k] = rec;
+    if (typeof Image === "undefined") {
+      tileFailed(rec);
+      return rec;
+    }
+    rec.img = new Image();
+    rec.img.onload = function () { tileLoaded(rec); };
+    rec.img.onerror = function () { tileFailed(rec); };
+    rec.img.src = tileUrl(z, x, y);
     return rec;
   }
 

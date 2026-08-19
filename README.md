@@ -547,7 +547,7 @@ py test_config.py
 ```
 
 One more, and it is not Python — the GPS overlay's page logic is
-JavaScript, so its 63 checks run under **node**:
+JavaScript, so its 80 checks run under **node**:
 
 ```
 node gps\overlay\test_overlay.js
@@ -555,7 +555,7 @@ node gps\overlay\test_overlay.js
 
 Node is a test dependency only. Nothing that drives, records or draws
 needs it — the whole simhub still runs on Python and pyserial — so if you
-never install it, that one line is all that goes quiet, and those 63
+never install it, that one line is all that goes quiet, and those 80
 checks are all you give up. Details, exit codes and what it defends are
 in [gps/README.md](gps/README.md#tests).
 

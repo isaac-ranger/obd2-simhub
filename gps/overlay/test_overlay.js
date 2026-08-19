@@ -50,7 +50,7 @@ const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPa
   " renderState: function () { return render; }," +
   " headingCam: function () { return { coupled: headingCamCoupled, tauMs: headingCamTauMs }; }," +
   " status: function () { return statusEl.textContent; }," +
-  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS, TILE_PX: TILE_PX, TILE_MAX_Z: TILE_MAX_Z, TILE_MAX_COUNT: TILE_MAX_COUNT, TILE_FAIL_RETRY_MS: TILE_FAIL_RETRY_MS, EQUATOR_M: EQUATOR_M, HEADING_TAU_MS: HEADING_TAU_MS, DEFAULT_HEADING_CAM_TAU_MS: DEFAULT_HEADING_CAM_TAU_MS, ARROW_RESIDUAL_MAX_DEG: ARROW_RESIDUAL_MAX_DEG }," +
+  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS, TILE_PX: TILE_PX, TILE_MAX_Z: TILE_MAX_Z, TILE_MAX_COUNT: TILE_MAX_COUNT, TILE_FAIL_RETRY_MS: TILE_FAIL_RETRY_MS, TILE_FAIL_RETRY_MAX_MS: TILE_FAIL_RETRY_MAX_MS, EQUATOR_M: EQUATOR_M, HEADING_TAU_MS: HEADING_TAU_MS, DEFAULT_HEADING_CAM_TAU_MS: DEFAULT_HEADING_CAM_TAU_MS, ARROW_RESIDUAL_MAX_DEG: ARROW_RESIDUAL_MAX_DEG }," +
   " lonLatToTileFrac: lonLatToTileFrac, tileToLatLon: tileToLatLon," +
   " zoomForMPerPx: zoomForMPerPx, tileUrl: tileUrl, getTile: getTile," +
   " visibleTileRange: visibleTileRange," +
@@ -85,8 +85,11 @@ try {
 }
 
 /* One fresh page per call: its own clock, its own trail, its own warnings.
-   `query` is the URL search string the page would have been opened with. */
-function load(query) {
+   `query` is the URL search string the page would have been opened with;
+   `shim`, if given, is merged into the window before the page runs — for
+   the one check that wants a browser global the default shim leaves out
+   (an Image, so onload/onerror can be fired by hand). */
+function load(query, shim) {
   let now = 1000;
   const warns = [];
   const statusEl = { textContent: "" };
@@ -104,6 +107,7 @@ function load(query) {
     fetch: (...a) => sandbox.__fetch ? sandbox.__fetch(...a) : new Promise(() => {}),
     setInterval: () => {},
   };
+  if (shim) Object.assign(sandbox, shim);
   vm.createContext(sandbox);
   try {
     vm.runInContext(BODY, sandbox, { filename: FILE });
@@ -322,6 +326,80 @@ async function main() {
     ok("map: a failed tile is asked for again after a few seconds",
        second !== first && second.status === "fail" && second.failedAt > first.failedAt,
        JSON.stringify({ first: first.failedAt, second: second && second.failedAt }));
+
+    // The retry's other arm: a tile that KEEPS failing is asked about less
+    // and less — the 4 s doubles per failure up to a minute and holds there,
+    // per tile, and the console says so once when the first tile reaches
+    // the ceiling. Never a hard stop: the same tiles come round on a lap.
+    const back = load("?map=alidade");
+    ok("backoff: the ceiling is a minute", back.api.consts.TILE_FAIL_RETRY_MAX_MS === 60000,
+       "max=" + back.api.consts.TILE_FAIL_RETRY_MAX_MS);
+    const waits = [], warnsAt = [];
+    let hole = back.api.getTile(2, 1, 1);
+    for (let i = 0; i < 6; i++) {
+      waits.push(hole.retryAt - hole.failedAt);
+      warnsAt.push(back.warns.length);
+      back.tick(hole.retryAt - hole.failedAt - 1);
+      if (back.api.getTile(2, 1, 1) !== hole) { waits.push("early"); break; }
+      back.tick(1);
+      const next = back.api.getTile(2, 1, 1);
+      if (next === hole) { waits.push("late"); break; }
+      hole = next;
+    }
+    ok("backoff: the wait doubles per failure, 4 s to a minute, then holds",
+       JSON.stringify(waits) === JSON.stringify([4000, 8000, 16000, 32000, 60000, 60000]), JSON.stringify(waits));
+    ok("backoff: the failure count rides across the re-ask", hole.fails === 7, "fails=" + hole.fails);
+    ok("backoff: the ceiling is announced once, when the first tile reaches it, not before",
+       JSON.stringify(warnsAt) === JSON.stringify([1, 1, 1, 1, 2, 2]) && back.warns.length === 2 &&
+       /once a minute/.test(back.warns[1]), JSON.stringify({ warnsAt: warnsAt, warns: back.warns }));
+    const other = back.api.getTile(2, 1, 2);
+    ok("backoff: a different tile starts at 4 s again (per tile, not global)",
+       other.fails === 1 && other.retryAt - other.failedAt === 4000, JSON.stringify(other));
+    let hole2 = other;
+    for (let i = 0; i < 5; i++) { back.tick(hole2.retryAt - hole2.failedAt); hole2 = back.api.getTile(2, 1, 2); }
+    ok("backoff: a second tile reaching the ceiling does not repeat the line",
+       hole2.retryAt - hole2.failedAt === 60000 && back.warns.length === 2, JSON.stringify(back.warns));
+
+    // Same arm on the browser path: a real-shaped Image whose onerror/onload
+    // the check fires by hand, so the count is seen to ride across Images
+    // and a load after the ceiling is seen to say so and re-arm the line.
+    const images = [];
+    class FakeImage { set src(v) { this.url = v; images.push(this); } get src() { return this.url; } }
+    const live = load("?map=alidade", { Image: FakeImage });
+    const r1 = live.api.getTile(3, 1, 1);
+    ok("backoff (browser path): a fresh tile is loading and one Image was asked",
+       r1.status === "loading" && images.length === 1 && /\/3\/1\/1\.png$/.test(images[0].src),
+       JSON.stringify({ status: r1.status, images: images.length, src: images[0] && images[0].src }));
+    ok("backoff (browser path): the same ask before onerror is the same record, no second Image",
+       live.api.getTile(3, 1, 1) === r1 && images.length === 1, "images=" + images.length);
+    images[0].onerror();
+    ok("backoff (browser path): onerror stamps the record and schedules the 4 s ask",
+       r1.status === "fail" && r1.fails === 1 && r1.retryAt - r1.failedAt === 4000 && live.warns.length === 1,
+       JSON.stringify(r1));
+    let cur = r1;
+    for (let i = 0; i < 4; i++) {
+      live.tick(cur.retryAt - cur.failedAt);
+      cur = live.api.getTile(3, 1, 1);
+      images[images.length - 1].onerror();
+    }
+    ok("backoff (browser path): the fifth failure reaches the minute, five Images asked, one line said",
+       cur.fails === 5 && cur.retryAt - cur.failedAt === 60000 && images.length === 5 && live.warns.length === 2,
+       JSON.stringify({ fails: cur.fails, images: images.length, warns: live.warns }));
+    live.tick(60000);
+    cur = live.api.getTile(3, 1, 1);
+    images[images.length - 1].onload();
+    ok("backoff (browser path): a load after the ceiling says the tiles are back, once, and clears the count",
+       cur.status === "ok" && cur.fails === 0 && live.warns.length === 3 && /loading again/.test(live.warns[2]),
+       JSON.stringify({ status: cur.status, fails: cur.fails, warns: live.warns }));
+    ok("backoff (browser path): a loaded tile stays loaded", live.api.getTile(3, 1, 1) === cur && images.length === 6,
+       "images=" + images.length);
+    let again = live.api.getTile(3, 2, 2);
+    for (let i = 0; i < 5; i++) {
+      images[images.length - 1].onerror();
+      if (i < 4) { live.tick(again.retryAt - again.failedAt); again = live.api.getTile(3, 2, 2); }
+    }
+    ok("backoff (browser path): the next outage gets its own line (re-armed by the load)",
+       again.fails === 5 && live.warns.length === 4 && /once a minute/.test(live.warns[3]), JSON.stringify(live.warns));
   }
   // 8. heading-up camera tau: world follows a slow heading, arrow the residual
   {
