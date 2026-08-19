@@ -25,10 +25,12 @@ from obd_config import parse_with_config, default_config_path
 sys.path.insert(0, os.path.join(HERE, "extractor"))
 sys.path.insert(0, os.path.join(HERE, "probe"))
 sys.path.insert(0, os.path.join(HERE, "supervisor"))
+sys.path.insert(0, os.path.join(HERE, "gps"))
 import obd_feed
 import obd_probe
 import learn_gears
 import supervisor as supervisor_mod
+import gps_overlay
 
 FAILED = []
 
@@ -379,7 +381,8 @@ for tool in obd_config.TOOLS:
 ok("the verbs are marked where they live",
    obd_config._tool_surface("obd_feed")[1] == {"register", "list_ports"}
    and obd_config._tool_surface("learn_gears")[1] == {"write"}
-   and obd_config._tool_surface("obd_probe")[1] == {"list_ports"})
+   and obd_config._tool_surface("obd_probe")[1] == {"list_ports"}
+   and obd_config._tool_surface("gps_overlay")[1] == {"list_ports"})
 
 
 print()

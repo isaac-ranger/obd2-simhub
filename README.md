@@ -1,8 +1,18 @@
 # obd2-simhub
 
-Feed **real-car telemetry** (RPM, speed, throttle, temps, gear …) from an OBD2
-Bluetooth adapter into **[SimHub](https://www.simhubdash.com/)**, so its gauges,
-dashboards, and stream overlays run off a real vehicle instead of a game.
+Get the **truth off a real car and onto a screen** — while somebody drives it.
+Two legs, two devices, one repo:
+
+* **OBD2 → SimHub.** RPM, speed, throttle, temps, gear (learned, not
+  transcribed) from a Bluetooth OBD2 adapter into
+  **[SimHub](https://www.simhubdash.com/)**, so its gauges, dashboards and
+  stream overlays run off the car instead of a game.
+* **GPS → browser overlay.** A 10 Hz XGPS160 into an ego-centred trail map
+  in Chrome or an OBS browser source — no SimHub anywhere in the path.
+
+SimHub is one consumer of the car; the overlay is another. The name on the
+door still says the first leg only; the contents stopped agreeing with it a
+while ago, and this README is written for what's actually inside.
 
 ```
  ┌─────────┐  Bluetooth SPP   ┌──────────────────┐   UDP (binary feed)   ┌────────┐
@@ -10,11 +20,38 @@ dashboards, and stream overlays run off a real vehicle instead of a game.
  │ OBD2    │   virtual COM    │  polls PIDs,     │   External Sim        │ dashes │
  │ port    │   port           │  decodes, sends  │   Integration         │overlays│
  └─────────┘                  └──────────────────┘   (.simdef contract)  └────────┘
+ ┌─────────┐  Bluetooth SPP   ┌──────────────────┐   HTTP: /live + page  ┌────────┐
+ │ XGPS160 │ ───────────────► │  gps_overlay.py  │ ────────────────────► │ Chrome │
+ │ 10 Hz   │   virtual COM    │  keeps last fix, │   ego-centred trail,  │  / OBS │
+ │ NMEA    │   port           │  serves overlay  │   optional map tiles  │ source │
+ └─────────┘                  └──────────────────┘                       └────────┘
 ```
 
-Built and proven on a **2025 718 Cayman GTS 4.0** with an **OBDLink MX+**, but
-nothing here is Porsche-specific — any ELM327/STN-compatible adapter on any
-CAN car should work, and step 1 tells you what *your* car actually gives you.
+Built and proven on a **2025 718 Cayman GTS 4.0** with an **OBDLink MX+** and
+a **Dual XGPS160**, but nothing here is Porsche-specific — any ELM327/STN-
+compatible adapter on any CAN car should work, any NMEA-over-SPP receiver
+should feed the overlay, and each leg's first step tells you what *your*
+hardware actually gives you.
+
+## The two legs, and how each one proves itself
+
+The thing that makes a repo runnable by someone else isn't more prose; it's
+a path from *I have the hardware* to *I know it works*. Each leg has one.
+
+| leg | the path | the proof step |
+|---|---|---|
+| **OBD2** (steps 1–5 below) | probe → learn your gearbox → point SimHub at it → run the feed → run the supervisor | **Step 1**: `py probe\obd_probe.py --port COM3` prints what your car advertises and how fast it answers. If that table appears, the adapter is talking to the car and not just to itself. |
+| **GPS** ([`gps/`](gps/README.md)) | capture → verify the capture → run the overlay | `py gps\gps_capture.py COM5 60`, then `py gps\gps_verify.py xgps160-capture.txt --expect stationary` (parked) or `--expect drive` (rename between the two — each run overwrites the file). The exit code is the verdict: a parked capture that claims motion, or a drive that goes nowhere, fails before any map is drawn — and the report never prints a coordinate, so it's safe to paste into a mail. The capture itself begins at your front curb, which is why `.gitignore` already refuses it. |
+
+The legs are separate processes and share nothing at runtime; what they
+share is the two-COM-ports-pick-the-outgoing-one ritual and a project that
+wants both on the same screen. They share `config.json` only halfway: the
+overlay reads it, and its port goes under `gps_overlay`, not `common` —
+`common.port` is the adapter, and an overlay that inherits it opens the
+OBDLink; the capture tool takes its port on the command line and reads no
+config at all. Everything from *What you need* down is the OBD2 ladder,
+with a GPS line added where the two legs touch; the GPS leg's own
+lab-notebook lives in [`gps/README.md`](gps/README.md), numbers and all.
 
 ---
 
@@ -23,6 +60,7 @@ CAN car should work, and step 1 tells you what *your* car actually gives you.
 | | |
 |---|---|
 | **Adapter** | OBDLink MX+ (what this was built on), or any ELM327/STN-compatible OBD2 Bluetooth adapter |
+| **GPS** (optional — the overlay leg only) | Dual XGPS160, or any receiver that talks NMEA over Bluetooth SPP. Skip it and nothing else here notices |
 | **PC** | Windows, with Bluetooth |
 | **Python** | 3.11+ recommended ([python.org](https://www.python.org/downloads/) — tick *Add python.exe to PATH*). 3.9/3.10 work, slightly less smoothly |
 | **SimHub** | **9.11.5 or newer** — External Sim Integration is beta and arrived in that release |
@@ -52,7 +90,12 @@ That's the only dependency.
    py probe\obd_probe.py --list-ports
    ```
 
-Everything below uses `COM3` as the example. Substitute yours.
+The XGPS160 pairs the same way and also makes two ports; `py gps\gps_overlay.py
+--list-ports` names the Bluetooth peer next to each, so the outgoing GPS is
+visible beside the listen-only half of its pair (and beside the OBD adapter's).
+
+Everything below uses `COM3` as the example for the adapter, `COM5` for the
+GPS. Substitute yours.
 
 ## Write it down once: config.json
 
@@ -74,8 +117,8 @@ rules, all five of them:
 
 * **`common`** holds values shared by more than one tool (the port, the
   baud). A section named after a tool (`obd_feed`, `obd_probe`,
-  `learn_gears`, `learn_throttle`, `fake_car`, `supervisor`, `report`)
-  applies to that tool only, and beats `common`.
+  `learn_gears`, `learn_throttle`, `gps_overlay`, `fake_car`,
+  `supervisor`, `report`) applies to that tool only, and beats `common`.
 * **The command line beats the file.** `--port COM7` on a config that says
   `COM3` means `COM7`, today only. (To keep that promise airtight, option
   abbreviations are off — spell `--port` out, `--po` is refused.)
@@ -396,10 +439,22 @@ that matters at an event.
 
 ```
 py supervisor\supervisor.py -- --port COM3
+py supervisor\supervisor.py --gps -- --port COM3      (both legs, one window)
 ```
 
 Everything after `--` is passed to `obd_feed.py` untouched, so every flag the
-feed has works here unchanged.
+feed has works here unchanged. `--gps` adds `gps_overlay.py` as a second
+child; it reads its own port from `config.json`'s `gps_overlay` section, the
+same way it does when you run it by hand, so on a rig that has written its
+ports down once, `--gps` is the whole instruction. Anything that must ride
+the command line instead goes in one quoted string:
+`--gps-args "--replay runs\gps-last.txt"`. (Split on spaces, no quoting
+inside — a Windows path with a backslash has to survive, and anything
+fancier belongs in `config.json` anyway. A lone flag wants the `=` form,
+`--gps-args=--list-ports`, or argparse reads it as one of the supervisor's
+own options. `"supervisor": {"gps": true}` in `config.json` turns the leg
+on permanently. And close any overlay you started by hand first — two of
+them fight over port 8765, and the supervisor's copy loses politely.)
 
 ### What it does
 
@@ -420,11 +475,41 @@ power-cycle the adapter for you — but it never stops trying, so when you *do*
 pull and replug the MX+, the feed comes back on its own and you never touch the
 keyboard.
 
+### The GPS leg is a different animal
+
+`gps_overlay.py` prints the same kind of once-a-second line (`  t    12s  GPS
+ok       age   0.1s  speed  45.2 km/h  crawl no …`, read from the same state
+`/live` serves) — and it prints it *even when the receiver is gone*, saying
+`LOST` and why. So the supervisor treats that child differently, on purpose:
+its pulse is "it printed a status line at all", and the **content** of the
+line is the health. Same `--stall-seconds` / `--stall-restart-seconds`
+numbers, different definition of quiet:
+
+| the GPS line says | the leg reads | what the supervisor does |
+|---|---|---|
+| `ok`, fresh fix, `crawl no` | `LIVE` | nothing |
+| `ok`, fresh fix, `crawl yes` | `CRAWLING` | nothing — parked is not broken |
+| `waiting` | `WAITING` | nothing — give the receiver some sky |
+| `LOST (reason)` | `LOST` | **nothing.** The receiver wandered off or napped; the process noticed, said so, and will pick it back up itself |
+| `ok` about a fix older than `--gps-fix-age-seconds` (30) | `LOST` | nothing — the port went quiet without saying so; the age is the tell |
+| *nothing at all* past `--stall-seconds` | `STALLED` | past `--stall-restart-seconds`, kills and restarts it — the ticker fails loud on a dead stdout, so silence is the one shape that means wedged |
+| the process exits | `RECONNECTING` / `NO_ADAPTER` | restarts it after a backoff, like the feed |
+
+In one breath: **the MX+ gets killed for wedging, and the GPS gets believed
+when it says `LOST`.** Killing the overlay for correctly reporting a receiver
+that went out of range would be the supervisor's own driveway bug, and we
+have done that one already.
+
 ### The status file
 
 `status/obd2_status.json`, rewritten atomically once a second, carrying a
 plain-English `summary` sentence meant to drop straight into a voice
-assistant's context.
+assistant's context. With `--gps` the file grows a `gps` stanza and the
+sentence covers both legs — `OBD live for 12 minutes, GPS crawling.` — because
+PitGirl reads a sentence, not a schema. Every top-level key keeps its
+single-leg meaning (`state`, `healthy`, `detail` are the OBD leg), so a reader
+written against last month's file keeps working; a `legs` list says which
+children are present.
 
 **The one rule for anything reading it:** check the clock. A dead supervisor
 leaves behind a file that still cheerfully says `LIVE`. Compare `updated_unix`
@@ -468,10 +553,25 @@ py extractor\obd_feed.py --replay reports\2026-07-31-kris-drive_01.csv
 
 ```
 py probe\test_parse.py            py probe\test_learn_gears.py
-py probe\test_learn_throttle.py
-py extractor\test_feed.py         py supervisor\test_supervisor.py
-py test_report.py                 py test_config.py
+py probe\test_learn_throttle.py   py gps\test_gps_capture.py
+py gps\test_nmea.py               py gps\test_live_state.py
+py gps\test_gps_verify.py         py extractor\test_feed.py
+py supervisor\test_supervisor.py  py test_report.py
+py test_config.py
 ```
+
+One more, and it is not Python — the GPS overlay's page logic is
+JavaScript, so its 83 checks run under **node**:
+
+```
+node gps\overlay\test_overlay.js
+```
+
+Node is a test dependency only. Nothing that drives, records or draws
+needs it — the whole simhub still runs on Python and pyserial — so if you
+never install it, that one line is all that goes quiet, and those 83
+checks are all you give up. Details, exit codes and what it defends are
+in [gps/README.md](gps/README.md#tests).
 
 The parser suite is 51 adversarial fixtures (single-frame, batched, ISO-TP
 multi-frame, spaced/unspaced/lowercase, multi-ECU, negative responses, ELM
@@ -493,6 +593,11 @@ probe/         obd_probe.py     step 1 — survey + drive logging
 extractor/     obd_feed.py      step 4 — the live feed
                fake_car.py      a car-shaped thing for desk testing
 supervisor/    supervisor.py    step 5 — keeps the feed alive
+gps/           gps_capture.py   the GPS leg: listening post (timestamped NMEA)
+               gps_verify.py    the proof step — health report, never a coordinate
+               gps_overlay.py   live fix + /live + the browser overlay server
+               overlay/         the page (index.html, overlay.js) and its node bench
+               README.md        the leg's own notes, with the measured numbers
 simdef/        the SimHub contract
 calibration.json                your car: gears, tires, tank, throttle, units
 config.example.json             copy to config.json: your rig (port, baud)
@@ -509,6 +614,12 @@ why learn gear ratios instead of tabling them), the SimHub contract details,
 CAN-bus research notes, and what standard OBD2 can and can't give you. Also
 several corrections this project made to its own earlier guesses, kept on
 purpose.
+
+**[gps/README.md](gps/README.md)** — the GPS leg end to end: what four real
+captures measured about the XGPS160 (10 Hz is position only; 26,104
+sentences, zero checksum failures; a parked receiver pins its own position),
+the capture and verify tools, and the overlay — its URL knobs, the crawl
+hold, the trail clock, the tiles, and the status line.
 
 ## License
 

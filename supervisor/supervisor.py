@@ -5,17 +5,20 @@ supervisor.py — phase 3: keep the feed alive without a keyboard
 
 Phase 2 answered "can the car talk to SimHub." This answers "can it keep
 doing that for three hours while your hands are full." It owns one thing
-only: the lifecycle of extractor/obd_feed.py. Start it, watch it, restart
-it, forever, never exit.
+only: the lifecycle of the car-facing processes — extractor/obd_feed.py
+always, and gps/gps_overlay.py when asked. Start them, watch them, restart
+them, forever, never exit.
 
 Deliberately NOT in scope: OBS, VoiceAttack, SimHub itself, the router,
 the MX+ pairing. Those are other people's processes with their own ideas
 about startup, and a supervisor that tries to restart OBS mid-event can
 do more harm than the failure it is fixing. This one babysits the
-extractor, where it can actually detect state and recover it.
+extractor (and the overlay), where it can actually detect state and
+recover it.
 
 Usage (Windows, the real thing):
   py supervisor\\supervisor.py -- --port COM3
+  py supervisor\\supervisor.py --gps -- --port COM3       (both legs)
 
 Usage (no car — against the fake car in another terminal):
   python extractor/fake_car.py --tcp 35000
@@ -23,6 +26,9 @@ Usage (no car — against the fake car in another terminal):
 
 Everything after `--` is handed to obd_feed.py untouched, so any flag the
 feed grows works here on the day it lands, with no change to this file.
+The GPS overlay is opt-in with --gps and takes its own settings from
+config.json's `gps_overlay` section, exactly as it does when run by hand;
+--gps-args carries anything that must ride the command line instead.
 
 WHAT IT WATCHES, AND WHY THAT WAY
 The feed already prints a status line every second with flush=True. That
@@ -32,7 +38,7 @@ the feed to grow a heartbeat channel — no change to obd_feed.py, and the
 signal means "data actually moved," not "the process is still resident."
 A process can be alive and wedged. A printed sample cannot.
 
-Four failures, four responses:
+Four failures, four responses (the OBD leg):
   - feed exits (25 misses, sender death, crash)    -> restart after backoff
   - feed alive but silent past --stall-seconds     -> report STALLED
   - no data THIS RUN past --stall-restart-seconds  -> kill the feed, restart it
@@ -58,18 +64,39 @@ the adapter. The supervisor cannot power-cycle it for you, but it retries
 forever — so when you do pull and replug the MX+, the feed comes back on
 its own and you never touch the keyboard.
 
+THE GPS LEG IS A DIFFERENT ANIMAL
+gps_overlay.py prints one status line a second too ("  t    12s  GPS ok
+age 0.1s ..."), from the same snapshot /live serves — and it prints it
+even when the receiver is gone, saying LOST and why. So for that child
+the pulse is "it printed a status line at all", and the CONTENT of the
+line is the health: ok / LOST / waiting, the fix age, crawl. The GPS gets
+believed when it says LOST: a receiver out of range or napping is the
+process correctly reporting the world, not a wedge, and killing it for
+that would be the driveway bug all over again — punishing a thing for
+doing nothing while parked. It is killed only for exiting (restart after
+backoff, like the feed) or for going silent — no line at all past the
+stall budget, which the ticker's fail-loud stdout path makes the honest
+signature of a wedged process. Same --stall-seconds and
+--stall-restart-seconds numbers, different definition of quiet.
+
 THE STATUS FILE
 Written to status/obd2_status.json (atomically — a reader never sees a
 half-written file). It carries a plain-English `summary` line meant to be
 dropped straight into PitGirl's context, plus the structured detail
-underneath for anything that wants to be precise.
+underneath for anything that wants to be precise. With --gps the file
+grows a `gps` stanza and the summary becomes one sentence about both
+legs — "OBD live for 12 minutes, GPS crawling." — because PitGirl reads a
+sentence, not a schema. Every top-level key keeps today's meaning for the
+OBD leg, so a reader written against the single-leg file keeps working.
 
 One thing the reader MUST do: check `updated_at` against `stale_after_s`.
 If the file is older than that, the supervisor itself is gone and the file
 is a photograph, not a status. A stale file still says LIVE — that is the
 oldest trap in monitoring, and this one is only avoided on the reading
 side. Both fields are in the file so the check is possible without knowing
-anything about this program.
+anything about this program. One quiet leg never makes the whole file
+stale: the file is rewritten every interval by the supervisor, whatever
+its children are doing.
 
 Requires: python 3.9+, stdlib only.
 """
@@ -94,6 +121,20 @@ from obd_config import parse_with_config, default_config_path, resolved_defaults
 # The feed's per-second status line: "  t   42s  RPM  2100  speed ...".
 # Replay mode prints the same shape, so one pattern covers both.
 SAMPLE_LINE = re.compile(r"^\s*t\s+\d+s\s+RPM\s")
+
+# The overlay's per-second status line: "  t   42s  GPS ok       age   0.1s
+# speed  45.2 km/h  crawl no   sats  9  acc  3.1 m  (reason)". Any line of
+# this shape is the pulse; the fields on it are the health. GPS_LINE is the
+# pulse test; GPS_FIELDS reads the line, tolerant of any column growing.
+GPS_LINE = re.compile(r"^\s*t\s+\d+s\s+GPS\s")
+GPS_FIELDS = re.compile(
+    r"^\s*t\s+(?P<t>\d+)s\s+GPS\s+(?P<status>ok|LOST|waiting)\s+"
+    r"age\s+(?:(?P<age>[\d.]+)s|-)"
+    r"(?:\s+speed\s+(?P<speed>[\d.]+)\s+km/h)?"
+    r"(?:\s+crawl\s+(?P<crawl>yes|no|-))?"
+    r"(?:\s+sats\s+(?P<sats>\d+|-))?"
+    r"(?:\s+acc\s+(?P<acc>[\d.]+|-)\s+m)?"
+    r"(?:\s+\((?P<reason>.*)\))?\s*$")
 
 # Exit output that means "the adapter isn't there" rather than "it stopped
 # answering". Different advice for the driver, so worth telling apart.
@@ -253,15 +294,22 @@ class LogSink:
                 self.f = None
 
 
+
+
 class Status:
     """The supervisor's view of the world, and the file it writes it to.
 
     Every field here is either directly observed or derived from something
     observed. Nothing is assumed to persist: if the supervisor cannot see
     it this second, it does not claim it.
+
+    This object is the OBD leg's state AND the writer of the whole status
+    file. Every top-level key keeps its single-leg meaning; when a GpsStatus
+    is attached, the file grows a `gps` stanza beside it and the summary
+    becomes one sentence about both legs.
     """
 
-    def __init__(self, path, stale_after_s, replay, settings=None):
+    def __init__(self, path, stale_after_s, replay, settings=None, gps=None):
         self.path = path
         self.stale_after_s = stale_after_s
         self.replay = replay
@@ -271,6 +319,7 @@ class Status:
         # makes every "it didn't fire" report ambiguous between a bug and a
         # setting — which is exactly the round trip this exists to prevent.
         self.settings = settings or {}
+        self.gps = gps                 # GpsStatus when --gps, else None
         self.started = now()
         self.state = "STARTING"
         self.state_since = now()
@@ -282,23 +331,57 @@ class Status:
         self.feed_pid = None
         self.total_samples = 0
 
-    def set_state(self, state):
-        if state != self.state:
-            self.state = state
-            self.state_since = now()
+    # -- what the child's output means ------------------------------------------
+
+    def saw_line(self, line):
+        """Called by the pump thread with every line the feed prints."""
+        if SAMPLE_LINE.match(line):
+            self.saw_sample()
 
     def saw_sample(self):
         self.last_data = now()
         self.last_data_mono = time.monotonic()
         self.total_samples += 1
 
+    @property
+    def pulse_mono(self):
+        """Monotonic stamp of the last thing that counts as a pulse for this
+        leg — for the OBD feed, the last sample line (data moved)."""
+        return self.last_data_mono
+
+    @property
+    def pulses(self):
+        return self.total_samples
+
+    def judge(self, since, run_age, stall_seconds):
+        """Set the state from the pulse age. `since` is seconds since this
+        run's last pulse (None = none yet), `run_age` seconds since the
+        child started."""
+        if since is None:
+            # No data yet this run. Give it the stall budget to connect
+            # before calling it anything worse than STARTING.
+            if run_age > stall_seconds:
+                self.set_state("STALLED")
+        elif since > stall_seconds:
+            self.set_state("STALLED")
+        else:
+            self.set_state("LIVE")
+
+    def set_state(self, state):
+        if state != self.state:
+            self.state = state
+            self.state_since = now()
+
     def seconds_since_data(self):
         if self.last_data_mono is None:
             return None
         return round(time.monotonic() - self.last_data_mono, 1)
 
+    # -- what it says -----------------------------------------------------------
+
     def summary(self):
-        """One sentence, spoken aloud, no jargon the driver has to decode."""
+        """One sentence, spoken aloud, no jargon the driver has to decode.
+        This is the OBD leg's own sentence; see spoken() for the file's."""
         in_state = human_duration((now() - self.state_since).total_seconds())
         if self.state == "LIVE":
             src = "Replaying a recorded drive" if self.replay else "The car is talking to SimHub"
@@ -331,21 +414,50 @@ class Status:
             return "The extractor was shut down deliberately. Nothing is running."
         return f"State {self.state}."
 
+    def phrase(self):
+        """The OBD leg in a few words, for the two-leg sentence: 'live for
+        12 minutes', 'stalled for 40 seconds', 'reconnecting (attempt 3)'."""
+        in_state = human_duration((now() - self.state_since).total_seconds())
+        if self.state == "LIVE":
+            return (f"replaying for {in_state}" if self.replay
+                    else f"live for {in_state}")
+        if self.state == "STALLED":
+            gap = self.seconds_since_data()
+            if gap is None:
+                return "stalled, the car has not answered yet"
+            return f"stalled for {human_duration(gap)}"
+        if self.state == "RECONNECTING":
+            return f"reconnecting (attempt {self.restarts + 1})"
+        if self.state == "NO_ADAPTER":
+            return "no adapter"
+        return self.state.lower()
+
+    def spoken(self):
+        """The file's `summary`: the OBD sentence alone, or — with a GPS leg
+        attached — one sentence naming both, because PitGirl reads a
+        sentence, not a schema: 'OBD live for 12 minutes, GPS crawling.'"""
+        if self.gps is None:
+            return self.summary()
+        return f"OBD {self.phrase()}, GPS {self.gps.phrase()}."
+
     def healthy(self):
         return self.state == "LIVE"
 
     def snapshot(self):
         ts = now()
-        return {
+        snap = {
             "schema": 1,
             "state": self.state,
             "healthy": self.healthy(),
-            "summary": self.summary(),
+            "summary": self.spoken(),
             "updated_at": iso(ts),
             "updated_unix": int(ts.timestamp()),
             # If updated_at is older than this, the SUPERVISOR is gone and
             # everything above is a photograph. Check it before believing it.
             "stale_after_s": self.stale_after_s,
+            # Which children this supervisor is running. A reader that wants
+            # the GPS stanza can check for it here rather than probing keys.
+            "legs": ["obd", "gps"] if self.gps is not None else ["obd"],
             "detail": {
                 "mode": "replay" if self.replay else "live",
                 "state_since": iso(self.state_since),
@@ -362,6 +474,9 @@ class Status:
                 "supervisor": self.settings,
             },
         }
+        if self.gps is not None:
+            snap["gps"] = self.gps.stanza(ts)
+        return snap
 
     def write(self):
         """Atomic, because PitGirl may read at any instant. A torn read of a
@@ -377,8 +492,209 @@ class Status:
         os.replace(tmp, self.path)
 
 
+class GpsStatus:
+    """The GPS leg's view of the world — the `gps` stanza of the status file.
+
+    Same lifecycle words as the OBD leg where they mean the same thing
+    (STARTING, STALLED, RECONNECTING, NO_ADAPTER, STOPPED). The live states
+    come from READING the overlay's line, not from the fact that it printed:
+      LIVE      the line says ok, fix is fresh, crawl no
+      CRAWLING  the line says ok, fix is fresh, crawl yes
+      WAITING   the line says waiting — up, no fix yet this run
+      LOST      the line says LOST (its reason rides along), or it says ok
+                about a fix older than fix_age_seconds — the silent-port
+                case the line itself documents ("ok with an age of minutes")
+    STALLED here means no line AT ALL for --stall-seconds: the ticker never
+    goes quiet on purpose, so quiet is the one thing that means wedged.
+    """
+
+    def __init__(self, fix_age_seconds=30.0):
+        self.fix_age_seconds = fix_age_seconds
+        self.state = "STARTING"
+        self.state_since = now()
+        self.last_line = None          # wall clock of the last status line
+        self.last_line_mono = None
+        self.lines_seen = 0
+        self.fix = {}                  # what the last line said, parsed
+        self.restarts = 0
+        self.last_restart = None
+        self.last_exit = None
+        self.feed_pid = None
+
+    # -- what the child's output means ------------------------------------------
+
+    def saw_line(self, line):
+        """Called by the pump thread with every line the overlay prints. Any
+        status line is a pulse; its fields become the health. Replace the
+        dict rather than mutate it — the main thread reads it unlocked."""
+        if not GPS_LINE.match(line):
+            return
+        self.last_line = now()
+        self.last_line_mono = time.monotonic()
+        self.lines_seen += 1
+        m = GPS_FIELDS.match(line)
+        if not m:
+            # The pulse counts — the process is alive — but a line this
+            # supervisor cannot read is not a fix it can vouch for. Fail
+            # toward loud: LOST, with the line as the reason.
+            self.fix = {"status": None, "age_s": None, "speed_kmh": None,
+                        "crawl": None, "sats": None, "accuracy_m": None,
+                        "reason": f"status line not understood: {line.strip()[:80]}"}
+            return
+        g = m.groupdict()
+        crawl = {"yes": True, "no": False}.get(g.get("crawl"))
+        self.fix = {
+            "status": g["status"],
+            "age_s": float(g["age"]) if g.get("age") else None,
+            "speed_kmh": float(g["speed"]) if g.get("speed") else None,
+            "crawl": crawl,
+            "sats": int(g["sats"]) if g.get("sats") not in (None, "-") else None,
+            "accuracy_m": float(g["acc"]) if g.get("acc") not in (None, "-") else None,
+            "reason": g.get("reason") or None,
+        }
+
+    @property
+    def pulse_mono(self):
+        """For the GPS leg the pulse is any status line at all — LOST is a
+        pulse. Silence is the only failure the process cannot report."""
+        return self.last_line_mono
+
+    @property
+    def pulses(self):
+        return self.lines_seen
+
+    def content_state(self):
+        """What the last line says the GPS is doing, in this leg's words."""
+        f = self.fix
+        st = f.get("status")
+        if st == "LOST":
+            return "LOST"
+        if st == "waiting":
+            return "WAITING"
+        if st == "ok":
+            age = f.get("age_s")
+            if age is not None and age > self.fix_age_seconds:
+                return "LOST"
+            return "CRAWLING" if f.get("crawl") is True else "LIVE"
+        return "LOST"      # a line it could not read — see saw_line
+
+    def lost_reason(self):
+        return self.fix.get("reason") or "no reason given"
+
+    def judge(self, since, run_age, stall_seconds):
+        if since is None:
+            if run_age > stall_seconds:
+                self.set_state("STALLED")
+        elif since > stall_seconds:
+            self.set_state("STALLED")
+        else:
+            self.set_state(self.content_state())
+
+    def set_state(self, state):
+        if state != self.state:
+            self.state = state
+            self.state_since = now()
+
+    def seconds_since_line(self):
+        if self.last_line_mono is None:
+            return None
+        return round(time.monotonic() - self.last_line_mono, 1)
+
+    def healthy(self):
+        return self.state in ("LIVE", "CRAWLING")
+
+    # -- what it says -----------------------------------------------------------
+
+    def summary(self):
+        """The GPS leg's own sentence, spoken aloud."""
+        in_state = human_duration((now() - self.state_since).total_seconds())
+        if self.state == "LIVE":
+            return "The GPS has a fix and the car is moving."
+        if self.state == "CRAWLING":
+            return "The GPS has a fix and the car is parked or crawling."
+        if self.state == "WAITING":
+            return ("The GPS overlay is up but has no fix yet. Give the "
+                    "receiver a clear view of the sky.")
+        if self.state == "LOST":
+            f = self.fix
+            if f.get("status") == "ok":
+                # The line still says ok; only the age gives it away.
+                return (f"The GPS fix is {human_duration(f.get('age_s') or 0)} old "
+                        f"and the overlay has not said why — the port may have "
+                        f"gone quiet.")
+            if f.get("status") is None:
+                return (f"The GPS overlay is up but printing a status line I "
+                        f"cannot read ({f.get('reason')}).")
+            return f"The GPS lost its fix {in_state} ago — {self.lost_reason()}."
+        if self.state == "STARTING":
+            return "Starting the GPS overlay — waiting for its first status line."
+        if self.state == "STALLED":
+            gap = self.seconds_since_line()
+            if gap is None:
+                return ("The GPS overlay is running but has not printed a "
+                        "status line yet.")
+            return (f"The GPS overlay is running but has printed nothing for "
+                    f"{human_duration(gap)} — it may be wedged.")
+        if self.state == "NO_ADAPTER":
+            return ("No GPS receiver found. Check the XGPS is on, paired, and "
+                    "on the right port — I will keep trying.")
+        if self.state == "RECONNECTING":
+            why = (self.last_exit or {}).get("reason", "")
+            tail = f" Last error: {why}" if why else ""
+            return (f"The GPS overlay stopped and I am restarting it. "
+                    f"Attempt {self.restarts + 1}.{tail}")
+        if self.state == "STOPPED":
+            return "The GPS overlay was shut down deliberately."
+        return f"State {self.state}."
+
+    def phrase(self):
+        """The GPS leg in a few words, for the two-leg sentence."""
+        in_state = human_duration((now() - self.state_since).total_seconds())
+        if self.state == "WAITING":
+            return "waiting for a fix"
+        if self.state == "LOST":
+            return f"lost for {in_state}"
+        if self.state == "STALLED":
+            gap = self.seconds_since_line()
+            return ("stalled, no status line yet" if gap is None
+                    else f"stalled, silent for {human_duration(gap)}")
+        if self.state == "RECONNECTING":
+            return f"reconnecting (attempt {self.restarts + 1})"
+        if self.state == "NO_ADAPTER":
+            return "no receiver"
+        return self.state.lower()
+
+    def stanza(self, ts):
+        return {
+            "state": self.state,
+            "healthy": self.healthy(),
+            "summary": self.summary(),
+            "detail": {
+                "state_since": iso(self.state_since),
+                "seconds_in_state": int((ts - self.state_since).total_seconds()),
+                "last_line_at": iso(self.last_line) if self.last_line else None,
+                "seconds_since_line": self.seconds_since_line(),
+                "lines_seen": self.lines_seen,
+                "fix": dict(self.fix),
+                "restarts": self.restarts,
+                "last_restart_at": iso(self.last_restart) if self.last_restart else None,
+                "last_exit": self.last_exit,
+                "pid": self.feed_pid,
+            },
+        }
+
+
+# Lines a child prints on its way out that carry a reason rather than a
+# log path. The feed says "25 consecutive failed samples" / "feed stopped";
+# the overlay says "GPS source dropped" / "stdout failed".
+REASON_HINTS = ("consecutive failed samples", "feed stopped",
+                "gps source dropped", "stdout failed")
+
+
 class FeedProcess:
-    """One run of obd_feed.py, and the thread that drains its output."""
+    """One run of a child (obd_feed.py or gps_overlay.py), and the thread
+    that drains its output. `status` is the leg's state object; every line
+    is handed to its saw_line(), which decides what counts as a pulse."""
 
     def __init__(self, argv, log_file, status, echo=True):
         self.argv = argv
@@ -408,8 +724,7 @@ class FeedProcess:
     def _pump(self):
         for line in self.proc.stdout:
             line = line.rstrip("\n")
-            if SAMPLE_LINE.match(line):
-                self.status.saw_sample()
+            self.status.saw_line(line)
             with self._lock:
                 self.tail.append(line)
                 if len(self.tail) > 40:
@@ -421,7 +736,7 @@ class FeedProcess:
                 self.log_file.flush()
 
     def exit_reason(self):
-        """The most useful line the feed said on its way out.
+        """The most useful line the child said on its way out.
 
         The feed is good about explaining itself — '25 consecutive failed
         samples', 'feed stopped (sender): ...'. Prefer a line that carries a
@@ -432,7 +747,7 @@ class FeedProcess:
             low = line.lower()
             if any(h in low for h in NO_ADAPTER_HINTS):
                 return line.strip()
-            if "consecutive failed samples" in low or "feed stopped" in low:
+            if any(h in low for h in REASON_HINTS):
                 return line.strip()
         for line in reversed(tail):
             if line.strip():
@@ -445,27 +760,223 @@ class FeedProcess:
         return any(h in tail for h in NO_ADAPTER_HINTS)
 
 
+class Leg:
+    """One supervised child and its restart policy, advanced by tick().
+
+    The policy is the same engine for both legs — STARTING, then LIVE-ish
+    or STALLED by pulse age, kill-and-restart past --stall-restart-seconds,
+    backoff between runs, healthy runs reset the backoff — and the legs
+    differ in what their state object counts as a pulse: the feed's is a
+    sample line (the car answered), the overlay's is any status line (the
+    process spoke, whatever it said). That one difference IS the per-child
+    policy: the MX+ gets killed for wedging, and the GPS gets believed when
+    it says LOST.
+
+    Nothing in here blocks. A kill is sent and collected on later ticks, so
+    one leg's bad day never stalls the other's judgement or the file."""
+
+    def __init__(self, name, argv, status, log_file, args, echo,
+                 stall_kill_seconds):
+        self.name = name
+        self.argv = argv
+        self.status = status
+        self.log_file = log_file
+        self.args = args
+        self.echo = echo
+        # 0/None = report only, never kill (the OBD replay exemption and
+        # --stall-restart-seconds 0 both arrive here as a falsy value).
+        self.stall_kill_seconds = stall_kill_seconds
+        self.backoff = args.backoff_start
+        self.current = None
+        self.run_started = None
+        self.stall_note = None
+        self.kill_sent = None       # monotonic stamp of terminate()
+        self.kill_escalated = False
+        self.next_start = 0.0       # monotonic; start when now >= this
+        self.stopped = False        # --max-restarts reached, or shut down
+
+    def _say(self, msg):
+        print(msg, flush=True)
+        self.log_file.write(msg + "\n")
+        self.log_file.flush()
+
+    def tick(self):
+        if self.stopped:
+            return
+        now_m = time.monotonic()
+        if self.current is None:
+            if now_m >= self.next_start:
+                self._start(now_m)
+            return
+        rc = self.current.proc.poll()
+        if rc is None:
+            self._judge(now_m)
+        else:
+            self._exited(rc, now_m)
+
+    def _start(self, now_m):
+        self.status.set_state("STARTING")
+        self.current = FeedProcess(self.argv, self.log_file, self.status,
+                                   echo=self.echo)
+        self.run_started = now_m
+        self.stall_note = None
+        self.kill_sent = None
+        self.kill_escalated = False
+        try:
+            self.current.start()
+        except OSError as e:
+            self.status.last_exit = {"code": None,
+                                     "reason": f"could not start {self.name}: {e}"}
+            self.status.set_state("NO_ADAPTER")
+            self.status.feed_pid = None
+            self.current = None
+            self.next_start = now_m + self.backoff
+            self.backoff = min(self.backoff * 2, self.args.backoff_max)
+
+    def _judge(self, now_m):
+        args = self.args
+        # One read of the pulse stamp, used for both the age and the
+        # per-run test. The pump thread updates it concurrently; with two
+        # reads, a first sample landing between them would leave `since`
+        # carrying the ancestor's age while the guard saw the newborn's
+        # timestamp — and the kill below would fire on a run that had just
+        # proved itself alive.
+        last_mono = self.status.pulse_mono
+        since = (round(now_m - last_mono, 1) if last_mono is not None else None)
+        if since is not None and last_mono < self.run_started:
+            # That data belonged to the previous run. A fresh child must be
+            # judged from its own birth, not its ancestor's last words — a
+            # real reconnect spends ~12 silent seconds in adapter reset and
+            # autotune, and inheriting stale age here would kill every new
+            # run at the starting line.
+            since = None
+        self.status.judge(since, now_m - self.run_started, args.stall_seconds)
+
+        if self.kill_sent is not None:
+            # A kill is in flight; poll() collects the exit. Escalate once
+            # if the polite one did not take, and say so once more if the
+            # hard one did not either — never let the log claim a restart
+            # that never happened.
+            if now_m - self.kill_sent > 5 and not self.kill_escalated:
+                self.kill_escalated = True
+                self.current.proc.kill()
+            elif now_m - self.kill_sent > 10 and self.kill_escalated is True:
+                self.kill_escalated = "reported"
+                self._say(f"supervisor: the kill did not take — the {self.name} "
+                          "process is stuck in the kernel; still watching, "
+                          "will collect it when the OS releases it")
+            return
+
+        # No pulse past the restart budget means the process is wedged, not
+        # recovering — for the feed, typically blocked in a serial write on
+        # a handle whose adapter lost power. It will never exit on its own,
+        # and while it lives it owns the dead port. Reopening the port is
+        # the only cure, and that takes a fresh process.
+        stalled_for = (since if since is not None else now_m - self.run_started)
+        if (self.stall_kill_seconds
+                and self.stall_note is None
+                and self.status.state == "STALLED"
+                and stalled_for > self.stall_kill_seconds):
+            what = (f"no {'data' if self.name == 'obd' else 'status line'} for "
+                    f"{human_duration(stalled_for)}"
+                    if since is not None else
+                    f"no {'data' if self.name == 'obd' else 'status line'} this "
+                    f"run in {human_duration(stalled_for)}")
+            self.stall_note = (f"{what} while the process stayed up — "
+                               f"judged wedged by the supervisor "
+                               f"(--stall-restart-seconds "
+                               f"{self.stall_kill_seconds:.0f}); restarting")
+            self._say(f"supervisor: {self.name}: {self.stall_note}")
+            self.current.proc.terminate()
+            self.kill_sent = now_m
+
+    def _exited(self, rc, now_m):
+        args, status = self.args, self.status
+        ran_for = now_m - self.run_started
+        # A stall-kill leaves the child no chance to explain itself, and its
+        # last words would be an ordinary status line — the supervisor is
+        # the one who knows why this run ended.
+        reason = self.stall_note or self.current.exit_reason()
+        status.last_exit = {"code": rc, "reason": reason}
+        status.feed_pid = None
+
+        if ran_for >= args.healthy_seconds and status.pulses:
+            # It worked for a real stretch before dying, so this is a fresh
+            # failure and not a tight crash loop. Start over gently.
+            self.backoff = args.backoff_start
+
+        status.restarts += 1
+        status.last_restart = now()
+        if args.max_restarts and status.restarts > args.max_restarts:
+            status.set_state("STOPPED")
+            status.last_exit = {"code": rc,
+                                "reason": f"stopped after {args.max_restarts} "
+                                          f"restarts (--max-restarts)"}
+            self.current = None
+            self.stopped = True
+            return
+
+        status.set_state("NO_ADAPTER" if self.current.looks_like_no_adapter()
+                         else "RECONNECTING")
+        self._say(f"\nsupervisor: {self.name} exited (code {rc}) after "
+                  f"{human_duration(ran_for)} — {reason or 'no reason given'}")
+        print(f"supervisor: restarting {self.name} in {self.backoff:.0f}s "
+              f"(restart #{status.restarts})\n", flush=True)
+        self.current = None
+        self.next_start = now_m + self.backoff
+        self.backoff = min(self.backoff * 2, args.backoff_max)
+
+    def shutdown(self):
+        self.stopped = True
+        if self.current and self.current.proc and self.current.proc.poll() is None:
+            self.current.proc.terminate()
+            try:
+                self.current.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.current.proc.kill()
+        if self.status.state != "STOPPED":
+            self.status.set_state("STOPPED")
+        self.status.feed_pid = None
+
+
+def _forward_config(args, child_args):
+    """A supervisor pointed at a non-default config file supervises children
+    that must read the same one — two processes disagreeing about which
+    file governs is a bug report nobody can reproduce. The default is not
+    forwarded: the child finds that on its own, and an explicit path that
+    does not exist should fail loudly, not implicitly."""
+    child_args = list(child_args)
+    if (args.config != default_config_path()
+            and not any(a == "--config" or a.startswith("--config=")
+                        for a in child_args)):
+        child_args = ["--config", args.config] + child_args
+    return child_args
+
+
 def build_feed_argv(args, feed_args):
     feed = args.feed or os.path.join(REPO, "extractor", "obd_feed.py")
     if not os.path.exists(feed):
         sys.exit(f"cannot find the feed at {feed} — pass --feed to point at it")
-    feed_args = list(feed_args)
-    # A supervisor pointed at a non-default config file supervises a feed
-    # that must read the same one — two processes disagreeing about which
-    # file governs is a bug report nobody can reproduce. The default is
-    # not forwarded: the feed finds that on its own, and an explicit path
-    # that does not exist should fail loudly, not implicitly.
-    if (args.config != default_config_path()
-            and not any(a == "--config" or a.startswith("--config=")
-                        for a in feed_args)):
-        feed_args = ["--config", args.config] + feed_args
     # -u: unbuffered child, so the per-second status line arrives per second.
-    return [args.python, "-u", feed] + feed_args
+    return [args.python, "-u", feed] + _forward_config(args, feed_args)
+
+
+def build_gps_argv(args):
+    overlay = args.gps_overlay or os.path.join(REPO, "gps", "gps_overlay.py")
+    if not os.path.exists(overlay):
+        sys.exit(f"cannot find the GPS overlay at {overlay} — pass "
+                 f"--gps-overlay to point at it")
+    # Split on whitespace, no quoting: a Windows path with a backslash must
+    # survive, and anything that needs quoting belongs in config.json's
+    # gps_overlay section, which the overlay reads on its own.
+    gps_args = (args.gps_args or "").split()
+    return [args.python, "-u", overlay] + _forward_config(args, gps_args)
 
 
 def build_parser():
     ap = argparse.ArgumentParser(
-        description="Keep obd_feed.py alive and publish a status file.",
+        description="Keep obd_feed.py (and, with --gps, gps_overlay.py) alive "
+                    "and publish a status file.",
         epilog="Everything after -- is passed to obd_feed.py untouched.",
     )
     ap.add_argument("--status-file",
@@ -475,7 +986,8 @@ def build_parser():
                     help="seconds between status file writes (default: 1)")
     ap.add_argument("--stall-seconds", type=float, default=10.0,
                     help="no data for this long, while the feed is still "
-                         "running, means STALLED (default: 10)")
+                         "running, means STALLED (default: 10). For the GPS "
+                         "leg 'data' is any status line at all — LOST counts")
     ap.add_argument("--stall-restart-seconds", type=float, default=45.0,
                     help="kill and restart the feed if it is still alive "
                          "after this many seconds without data, counted "
@@ -483,17 +995,35 @@ def build_parser():
                          "a dead handle cannot exit on its own. Keep it "
                          "comfortably above --stall-seconds so STALLED gets "
                          "reported before it escalates. Never applies to "
-                         "--replay runs. 0 = report only, never kill "
-                         "(default: 45)")
+                         "--replay runs. The GPS leg is killed only for this "
+                         "many seconds with NO status line — never for LOST. "
+                         "0 = report only, never kill (default: 45)")
     ap.add_argument("--backoff-start", type=float, default=2.0)
     ap.add_argument("--backoff-max", type=float, default=60.0)
     ap.add_argument("--healthy-seconds", type=float, default=60.0,
                     help="a run that carried data this long is judged healthy, "
                          "and the backoff resets (default: 60)")
     ap.add_argument("--max-restarts", type=int, default=0,
-                    help="stop after N restarts (default 0 = never stop; for "
-                         "tests, not for the car)")
+                    help="stop a leg after N restarts (default 0 = never stop; "
+                         "for tests, not for the car)")
     ap.add_argument("--feed", help="path to obd_feed.py")
+    ap.add_argument("--gps", action="store_true",
+                    help="also run and watch gps/gps_overlay.py as a second "
+                         "child. It reads config.json's gps_overlay section "
+                         "on its own (its port lives there), so this flag is "
+                         "usually the whole story; --gps-args for the rest")
+    ap.add_argument("--gps-args", default="",
+                    help="command line for the GPS overlay, in one quoted "
+                         "string split on spaces: --gps-args \"--port COM5\" "
+                         "or --gps-args \"--replay runs\\gps-last.txt\". A "
+                         "lone flag needs the = form (--gps-args=--list-ports) "
+                         "or argparse reads it as an option of this program. "
+                         "Anything that needs quoting goes in config.json")
+    ap.add_argument("--gps-overlay", help="path to gps_overlay.py")
+    ap.add_argument("--gps-fix-age-seconds", type=float, default=30.0,
+                    help="a GPS line that says ok about a fix older than "
+                         "this reads as LOST — the port went quiet without "
+                         "saying so (default: 30)")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--log-dir", default=os.path.join(REPO, "runs"),
                     help="where to keep the supervisor log (default: runs/)")
@@ -505,7 +1035,7 @@ def build_parser():
                          "timestamped file per start; 'off' writes nothing "
                          "(console echo and the status file are unaffected)")
     ap.add_argument("--quiet", action="store_true",
-                    help="do not echo the feed's output to this console")
+                    help="do not echo the children's output to this console")
     return ap
 
 
@@ -516,10 +1046,15 @@ def main():
 
     # A --config typed after the -- would govern the feed but not this
     # process — two processes on different files is a bug report nobody
-    # can reproduce. Refuse rather than split.
-    if any(a == "--config" or a.startswith("--config=") for a in feed_args):
+    # can reproduce. Refuse rather than split. Same for the GPS args.
+    def _has_config(argv):
+        return any(a == "--config" or a.startswith("--config=") for a in argv)
+    if _has_config(feed_args):
         sys.exit("supervisor: put --config BEFORE the -- separator — one "
                  "config file governs both the supervisor and the feed")
+    if args.gps and _has_config((args.gps_args or "").split()):
+        sys.exit("supervisor: put --config on the supervisor, not in "
+                 "--gps-args — one config file governs every process here")
 
     argv = build_feed_argv(args, feed_args)
     # Replay drives the status file's honesty and the stall-kill
@@ -529,6 +1064,7 @@ def main():
     # argv[3:] is exactly the child's command line (after
     # [python, -u, feed]), including any forwarded --config.
     replay = bool(resolved_defaults("obd_feed", argv[3:]).replay)
+    gps_argv = build_gps_argv(args) if args.gps else None
 
     log_file = LogSink(args.log_dir, args.run_log)
 
@@ -540,15 +1076,25 @@ def main():
         "status_interval": args.status_interval,
         "mode": "replay" if replay else "live",
     }
+    gps = None
+    if args.gps:
+        settings["gps_fix_age_seconds"] = args.gps_fix_age_seconds
+        gps = GpsStatus(fix_age_seconds=args.gps_fix_age_seconds)
 
     status = Status(args.status_file, stale_after_s=int(args.status_interval * 5 + 5),
-                    replay=replay, settings=settings)
+                    replay=replay, settings=settings, gps=gps)
     status.write()
 
     stopping = threading.Event()
+    # The handler only flips a plain flag. Event.set() takes a lock, and a
+    # second signal landing while the first handler holds it deadlocks the
+    # main thread inside its own handler — seen once with SIGINT+SIGTERM
+    # back to back. The loop below polls the flag once per interval, so a
+    # ctrl-c is honoured within one status write.
+    stop_flag = []
 
     def on_signal(signum, _frame):
-        stopping.set()
+        stop_flag.append(signum)
 
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
@@ -565,6 +1111,10 @@ def main():
     # sits in a different state.
     banner = [
         f"supervisor: watching {' '.join(argv)}",
+    ]
+    if gps_argv:
+        banner.append(f"supervisor: watching {' '.join(gps_argv)}")
+    banner += [
         f"supervisor: status  -> {args.status_file}",
         f"supervisor: log     -> {log_file.path or '(off)'}"
         + (f"  (this session only; previous kept at {LogSink.PREV}; "
@@ -572,8 +1122,13 @@ def main():
            if log_file.mode == "tail" else "") + log_file.note,
         f"supervisor: stalled after {args.stall_seconds:g}s without data; "
         f"kill-and-restart a wedged feed after {stall_restart}",
-        "supervisor: ctrl-c to stop.",
     ]
+    if gps_argv:
+        banner.append(
+            f"supervisor: the GPS leg is believed when it says LOST; it is "
+            f"restarted only if it exits or prints no status line for "
+            f"{stall_restart}")
+    banner.append("supervisor: ctrl-c to stop.")
     for line in banner:
         print(line)
         log_file.write(line + "\n")
@@ -581,160 +1136,26 @@ def main():
     log_file.write("\n")
     log_file.flush()
 
-    backoff = args.backoff_start
-    current = None
+    legs = [Leg("obd", argv, status, log_file, args, echo=not args.quiet,
+                stall_kill_seconds=(0 if replay else args.stall_restart_seconds))]
+    if gps_argv:
+        # No replay exemption here: a GPS replay loops the capture and keeps
+        # printing its line, so the only way it goes silent is a wedge.
+        legs.append(Leg("gps", gps_argv, gps, log_file, args,
+                        echo=not args.quiet,
+                        stall_kill_seconds=args.stall_restart_seconds))
 
     try:
-        while not stopping.is_set():
-            status.set_state("STARTING")
+        while not stop_flag:
+            for leg in legs:
+                leg.tick()
             status.write()
-            current = FeedProcess(argv, log_file, status, echo=not args.quiet)
-            run_started = time.monotonic()
-            try:
-                current.start()
-            except OSError as e:
-                status.last_exit = {"code": None, "reason": f"could not start the feed: {e}"}
-                status.set_state("NO_ADAPTER")
-                status.write()
-                if not stopping.wait(backoff):
-                    backoff = min(backoff * 2, args.backoff_max)
-                    continue
+            if all(leg.stopped for leg in legs):
                 break
-
-            # Watch this run until the child exits or we are told to stop.
-            stall_note = None
-            while not stopping.is_set():
-                rc = current.proc.poll()
-                if rc is not None:
-                    break
-                # One read of last_data_mono, used for both the age and the
-                # per-run test. The pump thread updates it concurrently; with
-                # two reads, a first sample landing between them would leave
-                # `since` carrying the ancestor's age while the guard saw the
-                # newborn's timestamp — and the kill below would fire on a
-                # run that had just proved itself alive.
-                last_mono = status.last_data_mono
-                since = (round(time.monotonic() - last_mono, 1)
-                         if last_mono is not None else None)
-                if since is not None and last_mono < run_started:
-                    # That data belonged to the previous run. A fresh feed
-                    # must be judged from its own birth, not its ancestor's
-                    # last words — a real reconnect spends ~12 silent seconds
-                    # in adapter reset and autotune, and inheriting stale age
-                    # here would kill every new run at the starting line.
-                    since = None
-                if since is None:
-                    # No data yet this run. Give it the stall budget to
-                    # connect before calling it anything worse than STARTING.
-                    if time.monotonic() - run_started > args.stall_seconds:
-                        status.set_state("STALLED")
-                elif since > args.stall_seconds:
-                    status.set_state("STALLED")
-                else:
-                    status.set_state("LIVE")
-                status.write()
-
-                # No data past the restart budget means the process is wedged,
-                # not recovering — typically blocked in a serial write on a
-                # handle whose adapter lost power. It will never exit on its
-                # own, and while it lives it owns the dead port. Reopening the
-                # port is the only cure, and that takes a fresh process.
-                # Replay runs are exempt: they cannot wedge on a dead handle,
-                # and a quiet stretch in a recording ends by itself.
-                stalled_for = (since if since is not None
-                               else time.monotonic() - run_started)
-                if (args.stall_restart_seconds and not replay
-                        and stall_note is None
-                        and status.state == "STALLED"
-                        and stalled_for > args.stall_restart_seconds):
-                    what = (f"no data for {human_duration(stalled_for)}"
-                            if since is not None else
-                            f"no data this run in {human_duration(stalled_for)}")
-                    stall_note = (f"{what} while the process stayed up — "
-                                  f"judged wedged by the supervisor "
-                                  f"(--stall-restart-seconds "
-                                  f"{args.stall_restart_seconds:.0f}); "
-                                  f"restarting")
-                    msg = f"supervisor: {stall_note}"
-                    print(msg, flush=True)
-                    log_file.write(msg + "\n")
-                    log_file.flush()
-                    current.proc.terminate()
-                    try:
-                        current.proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        current.proc.kill()
-                        try:
-                            current.proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            # TerminateProcess can fail against a process
-                            # stuck in an uncancelable kernel I/O request —
-                            # the very class of hang this path exists for.
-                            # Say so, rather than letting the log claim a
-                            # restart that never happened. The loop keeps
-                            # reporting STALLED honestly either way, and the
-                            # exit is collected whenever the OS lets go.
-                            msg = ("supervisor: the kill did not take — the "
-                                   "process is stuck in the kernel; still "
-                                   "watching, will collect it when the OS "
-                                   "releases it")
-                            print(msg, flush=True)
-                            log_file.write(msg + "\n")
-                            log_file.flush()
-                    continue  # next poll() collects the exit
-
-                stopping.wait(args.status_interval)
-
-            if stopping.is_set():
-                break
-
-            rc = current.proc.wait()
-            ran_for = time.monotonic() - run_started
-            # A stall-kill leaves the feed no chance to explain itself, and
-            # its last words would be an ordinary sample line — the supervisor
-            # is the one who knows why this run ended.
-            reason = stall_note or current.exit_reason()
-            status.last_exit = {"code": rc, "reason": reason}
-            status.feed_pid = None
-
-            if ran_for >= args.healthy_seconds and status.total_samples:
-                # It worked for a real stretch before dying, so this is a
-                # fresh failure and not a tight crash loop. Start over gently.
-                backoff = args.backoff_start
-
-            status.restarts += 1
-            status.last_restart = now()
-            if args.max_restarts and status.restarts > args.max_restarts:
-                status.set_state("STOPPED")
-                status.last_exit = {"code": rc,
-                                    "reason": f"stopped after {args.max_restarts} "
-                                              f"restarts (--max-restarts)"}
-                status.write()
-                break
-
-            status.set_state("NO_ADAPTER" if current.looks_like_no_adapter()
-                             else "RECONNECTING")
-            status.write()
-            msg = (f"\nsupervisor: feed exited (code {rc}) after "
-                   f"{human_duration(ran_for)} — {reason or 'no reason given'}")
-            print(msg, flush=True)
-            log_file.write(msg + "\n")
-            print(f"supervisor: restarting in {backoff:.0f}s "
-                  f"(restart #{status.restarts})\n", flush=True)
-
-            if stopping.wait(backoff):
-                break
-            backoff = min(backoff * 2, args.backoff_max)
+            stopping.wait(args.status_interval)
     finally:
-        if current and current.proc and current.proc.poll() is None:
-            current.proc.terminate()
-            try:
-                current.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                current.proc.kill()
-        if status.state != "STOPPED":
-            status.set_state("STOPPED")
-        status.feed_pid = None
+        for leg in legs:
+            leg.shutdown()
         status.write()
         print("\nsupervisor: stopped. Status file left at "
               f"{args.status_file} saying STOPPED.")
