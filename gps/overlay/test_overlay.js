@@ -404,6 +404,26 @@ async function main() {
     }
     ok("backoff (browser path): the next outage gets its own line (re-armed by the load)",
        again.fails === 5 && live.warns.length === 4 && /once a minute/.test(live.warns[3]), JSON.stringify(live.warns));
+    let once = live.api.getTile(3, 5, 5);
+    images[images.length - 1].onerror();
+    live.tick(once.retryAt - once.failedAt);
+    once = live.api.getTile(3, 5, 5);
+    images[images.length - 1].onload();
+    ok("backoff (browser path): a tile that failed once, then loads, is enough to re-arm (any recovery, not a deep one)",
+       once.status === "ok" && live.warns.length === 5 && /loading again/.test(live.warns[4]), JSON.stringify(live.warns));
+
+    // The ceiling test must not depend on float subtraction: on a real
+    // performance.now() clock, retryAt - failedAt can read 59999.999… just
+    // under a power-of-two millisecond, and a line that compares that to
+    // 60000 fires one failure late. Put the fifth failure at such a clock
+    // value (4134304.1 ms, sixty seconds under 2^22) and ask for the line.
+    const frac = load("?map=alidade");
+    frac.tick(4073304.1);
+    let fr = frac.api.getTile(2, 3, 3);
+    for (let i = 0; i < 4; i++) { frac.tick(fr.retryAt - fr.failedAt); fr = frac.api.getTile(2, 3, 3); }
+    ok("backoff: the ceiling line fires on the fifth failure on a fractional clock too, and says five",
+       fr.fails === 5 && fr.retryAt - fr.failedAt < 60000 && frac.warns.length === 2 && /failed 5 times/.test(frac.warns[1]),
+       JSON.stringify({ failedAt: fr.failedAt, diff: fr.retryAt - fr.failedAt, warns: frac.warns }));
   }
   // 8. heading-up camera tau: world follows a slow heading, arrow the residual
   {
