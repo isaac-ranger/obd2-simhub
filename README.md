@@ -1,4 +1,4 @@
-# obd2-simhub
+# realcar-overlays
 
 Get the **truth off a real car and onto a screen** — while somebody drives it.
 Two legs, two devices, one repo:
@@ -71,10 +71,17 @@ lab-notebook lives in [`gps/README.md`](gps/README.md), numbers and all.
 **Code → Download ZIP** on this page and extract it, or:
 
 ```
-git clone https://github.com/isaac-ranger/obd2-simhub
-cd obd2-simhub
+git clone https://github.com/isaac-ranger/realcar-overlays
+cd realcar-overlays
 pip install pyserial
 ```
+
+(This repo was `obd2-simhub` until 2026-08-19. The name described the first
+leg and the repo outgrew it; the old URL redirects here, so an existing
+clone keeps working — `git remote set-url origin
+https://github.com/isaac-ranger/realcar-overlays` if you'd rather it said
+so. The SimHub definition file keeps its `obd2-simhub.simdef` name, because
+that is what your SimHub points at.)
 
 That's the only dependency.
 
