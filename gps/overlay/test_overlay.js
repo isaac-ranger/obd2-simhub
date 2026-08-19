@@ -39,7 +39,7 @@ const OPEN = /\(function\s*\(\)\s*\{\s*"use strict";/;
 const CLOSE = /\}\)\(\);\s*$/;
 // The internals the checks reach for, exported in place of the closing line.
 // Every name here is a top-level binding inside overlay.js's IIFE.
-const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPaused, statusEl, lonLatToTileFrac, tileToLatLon, zoomForMPerPx, tileUrl, tileCache, mapOn, mapDraw, mapName, visibleTileRange, advanceRender, arrowHeadingDeg, headingCamCoupled, headingCamTauMs];" + // touch every lazily-used name NOW, so a rename fails at load, not mid-run
+const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPaused, statusEl, lonLatToTileFrac, tileToLatLon, zoomForMPerPx, tileUrl, tileCache, mapOn, mapDraw, mapName, visibleTileRange, advanceRender, arrowHeadingDeg, headingCamCoupled, headingCamTauMs, getTile];" + // touch every lazily-used name NOW, so a rename fails at load, not mid-run
   "\n__exports = {" +
   " poll: poll, maybeAppendTrail: maybeAppendTrail, draw: draw," +
   " trailState: function () { return { trail: trail, trailClockMs: trailClockMs, trailClockPaused: trailClockPaused }; }," +
@@ -50,9 +50,9 @@ const EXPORTS = "\nvoid [fix, fixAtMs, render, trail, trailClockMs, trailClockPa
   " renderState: function () { return render; }," +
   " headingCam: function () { return { coupled: headingCamCoupled, tauMs: headingCamTauMs }; }," +
   " status: function () { return statusEl.textContent; }," +
-  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS, TILE_PX: TILE_PX, TILE_MAX_Z: TILE_MAX_Z, TILE_MAX_COUNT: TILE_MAX_COUNT, EQUATOR_M: EQUATOR_M, HEADING_TAU_MS: HEADING_TAU_MS, DEFAULT_HEADING_CAM_TAU_MS: DEFAULT_HEADING_CAM_TAU_MS, ARROW_RESIDUAL_MAX_DEG: ARROW_RESIDUAL_MAX_DEG }," +
+  " consts: { TRAIL_MAX_POINTS: TRAIL_MAX_POINTS, TRAIL_MAX_MS: TRAIL_MAX_MS, TRAIL_MIN_M: TRAIL_MIN_M, POLL_MS: POLL_MS, TILE_PX: TILE_PX, TILE_MAX_Z: TILE_MAX_Z, TILE_MAX_COUNT: TILE_MAX_COUNT, TILE_FAIL_RETRY_MS: TILE_FAIL_RETRY_MS, EQUATOR_M: EQUATOR_M, HEADING_TAU_MS: HEADING_TAU_MS, DEFAULT_HEADING_CAM_TAU_MS: DEFAULT_HEADING_CAM_TAU_MS, ARROW_RESIDUAL_MAX_DEG: ARROW_RESIDUAL_MAX_DEG }," +
   " lonLatToTileFrac: lonLatToTileFrac, tileToLatLon: tileToLatLon," +
-  " zoomForMPerPx: zoomForMPerPx, tileUrl: tileUrl," +
+  " zoomForMPerPx: zoomForMPerPx, tileUrl: tileUrl, getTile: getTile," +
   " visibleTileRange: visibleTileRange," +
   " mapFlags: function () { return { mapOn: mapOn, mapDraw: mapDraw, style: mapOn ? mapName : null }; }," +
   " tiles: function () { return tileCache; }" +
@@ -307,6 +307,21 @@ async function main() {
        JSON.stringify(alias.api.mapFlags()) + " " + alias.api.tileUrl(17, 1, 2));
     const unknown = load("?map=nope");
     ok("map: an unknown style stays off", unknown.api.mapFlags().mapOn === false, JSON.stringify(unknown.api.mapFlags()));
+
+    const retry = load("?map=alidade");
+    const first = retry.api.getTile(1, 0, 0);
+    ok("map: a failed tile is stamped, not a bare fail",
+       first.status === "fail" && first.failedAt != null, JSON.stringify(first));
+    ok("map: a failed tile is not retried on the next frame",
+       retry.api.getTile(1, 0, 0) === first, "got a new record before the retry window");
+    retry.tick(retry.api.consts.TILE_FAIL_RETRY_MS - 1);
+    ok("map: still the same hole just inside the retry window",
+       retry.api.getTile(1, 0, 0) === first, "retried early");
+    retry.tick(2);
+    const second = retry.api.getTile(1, 0, 0);
+    ok("map: a failed tile is asked for again after a few seconds",
+       second !== first && second.status === "fail" && second.failedAt > first.failedAt,
+       JSON.stringify({ first: first.failedAt, second: second && second.failedAt }));
   }
   // 8. heading-up camera tau: world follows a slow heading, arrow the residual
   {

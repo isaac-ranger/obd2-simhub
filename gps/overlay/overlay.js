@@ -101,6 +101,7 @@
   var TILE_PX = 256;
   var TILE_MAX_Z = 20;
   var TILE_MAX_COUNT = 160;          // viewport plus pad, and √2 more when heading-up rotates the AABB
+  var TILE_FAIL_RETRY_MS = 4000;     // a failed tile is a hole, not a life sentence
   var EQUATOR_M = 40075016.686;      // WGS84 circumference, for mercator metres/pixel
   var TILE_HOST = "https://tiles.stadiamaps.com/tiles/";
   var MAP_STYLES = {
@@ -286,15 +287,26 @@
 
   function getTile(z, x, y) {
     var k = (mapStyle ? mapStyle.slug : "") + "/" + z + "/" + x + "/" + y;
-    if (tileCache[k]) return tileCache[k];
+    var now = window.performance.now();
+    var rec = tileCache[k];
+    if (rec) {
+      if (rec.status === "fail") {
+        var age = (rec.failedAt != null) ? (now - rec.failedAt) : TILE_FAIL_RETRY_MS;
+        if (age < TILE_FAIL_RETRY_MS) return rec;
+        delete tileCache[k];
+      } else {
+        return rec;
+      }
+    }
     if (typeof Image === "undefined") {
-      tileCache[k] = { status: "fail" };
+      tileCache[k] = { status: "fail", failedAt: now };
       return tileCache[k];
     }
-    var rec = { img: new Image(), status: "loading" };
+    rec = { img: new Image(), status: "loading" };
     rec.img.onload = function () { rec.status = "ok"; };
     rec.img.onerror = function () {
       rec.status = "fail";
+      rec.failedAt = window.performance.now();
       if (!tileFailWarned) {
         tileFailWarned = true;
         console.warn("map tile failed to load; on 127.0.0.1 try without a key, or add ?stadiaKey=");
