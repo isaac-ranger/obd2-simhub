@@ -3,7 +3,7 @@
      node gps/overlay/test_overlay.js                 (overlay.js sits next to this file)
      node gps/overlay/test_overlay.js some/overlay.js  (check a different copy)
 
-   Node is a TEST dependency only. The simhub itself runs on Python; this file
+   Node is a TEST dependency only. The OBD feed runs on Python; this file
    is the one thing in the repo that wants anything else, and what it wants is
    node's standard library (fs, path, vm) — nothing from npm. Skip it and you
    lose these checks and nothing else.
