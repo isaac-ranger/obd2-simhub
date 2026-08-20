@@ -9,7 +9,7 @@ place to keep it. config.json in the repo root holds it instead, and any
 tool here picks it up at startup:
 
     {
-      "common":     { "obd_port": "COM3", "gps_port": "COM5", "baud": 115200 },
+      "common":     { "obd_port": "COM3", "gps_port": "COM5", "obd_baud": 115200 },
       "obd_feed":   { "dash_gear": "hold" },
       "supervisor": { "quiet": true }
     }
@@ -23,9 +23,11 @@ tool here picks it up at startup:
     gps_overlay both spell their option --port and mean different
     hardware, and a bare common.port that reached both once handed the
     OBD adapter's port to the GPS overlay. The bare spellings (port,
-    baud) still work and keep their original meaning, the OBD adapter —
-    they predate the second device. Inside a tool's own section the tool
-    is the scope, so the key stays plain "port" there.
+    baud) are not keys at all: a config that says common.port refuses
+    to start and names the rename, whichever tool meets it — ignoring
+    it quietly would mean an old config starts with no port and takes
+    whatever default is lying around. Inside a tool's own section the
+    tool is the scope, so the key stays plain "port" there.
   - A tool-named section applies to that tool only, and beats "common".
   - The command line beats everything. Precedence, highest first:
         CLI  >  tool section  >  common  >  built-in default
@@ -55,9 +57,9 @@ haunting. Verbs are marked at their add_argument site with
 `.per_run = True`, so the knowledge lives with the parser, not in a
 second list here. Device-identifying options are marked the same way,
 `.device = "obd"` (or "gps") at the add_argument site: the mark is what
-gives an option its scoped name in "common" and keeps a bare key that
-means one device from reaching a tool whose same-named option means
-another.
+gives an option its scoped name in "common" — and what makes the bare
+spelling refuse there, whichever tool meets it, instead of reaching a
+tool whose same-named option means another device.
 
 The one list that does exist is TOOLS below — section names have to map
 to files somehow. Six lines that change only when a tool is born are a
@@ -99,11 +101,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_NAME = "config.json"
 COMMON = "common"
-
-# common.port and common.baud predate the GPS leg: the bare spellings keep
-# their original owner, so a config written in the OBD-only days keeps
-# meaning exactly what it meant.
-LEGACY_BARE_DEVICE = "obd"
 
 # section name -> the file whose argparse parser defines that section's
 # keys (via its build_parser()), relative to the repo root.
@@ -318,8 +315,6 @@ def _apply(parser, tool, cfg, path, argv):
                      "an object of key/value settings")
 
     merged, merged_src = {}, {}
-    shadowed = []       # bare device keys in "common" that this tool's
-                        # same-named option must not take (other device)
     for section in (COMMON, tool):                    # tool wins on conflict
         for key, value in cfg.get(section, {}).items():
             if key == "config":
@@ -333,21 +328,13 @@ def _apply(parser, tool, cfg, path, argv):
             if section == COMMON and key in scoped:
                 dest = scoped[key]
             elif key in own:
-                device = getattr(own[key], "device", None)
-                if section == COMMON and device and device != LEGACY_BARE_DEVICE:
-                    # The bare key predates the second device and still
-                    # means the first one's — which this option is not.
-                    # Skip it here; the neighbour check below still makes
-                    # sure it reaches somebody.
-                    shadowed.append((key, own[key]))
-                else:
-                    dest = key
+                if section == COMMON and getattr(own[key], "device", None):
+                    # A device-identifying key in "common" has exactly one
+                    # spelling: the scoped one.
+                    _refuse_bare_device_key(key, path)
+                dest = key
             if dest is not None:
                 _check_value(own[dest], key, value, section, path)
-                if dest in merged and section == COMMON:
-                    sys.exit(f"config error ({path}): {merged_src[dest]} "
-                             f"and {section}.{key} are the same setting "
-                             "spelled twice — pick one")
                 merged[dest] = value
                 merged_src[dest] = f"{section}.{key}"
             elif section == tool:
@@ -385,32 +372,6 @@ def _apply(parser, tool, cfg, path, argv):
 
     if merged:
         _referee_exclusive_groups(parser, merged, merged_src, path, argv)
-
-    # The one rig whose behavior changed — a bare device key in "common"
-    # and no value for this tool's option from anywhere else — is told
-    # why, on the run where it matters and only there. (Before the device
-    # marks existed, that rig silently opened the other device.)
-    given = _cli_given(argv)
-    for key, action in shadowed:
-        peers = [action]
-        for g in _exclusive_groups(parser):
-            if action in g._group_actions:
-                peers = g._group_actions
-                break
-        # Quiet if the option — or any exclusive-group peer that makes it
-        # moot (a configured replay) — got a value from the file or the
-        # command line.
-        if any(a.dest in merged for a in peers):
-            continue
-        if any(s in given for a in peers for s in a.option_strings):
-            continue
-        print(f"config note ({path}): common.{key} means the "
-              f"{LEGACY_BARE_DEVICE} {key} and does not reach {tool}, "
-              f"whose {key} is a different device — write "
-              f"common.{action.device}_{key}, or {key!r} in the "
-              f"{tool!r} section", file=sys.stderr)
-
-    if merged:
         parser.set_defaults(**merged)
 
 
@@ -521,15 +482,37 @@ def _referee_exclusive_groups(parser, merged, merged_src, path, argv):
                     merged.pop(a.dest, None)
 
 
+def _refuse_bare_device_key(key, path):
+    """The bare spellings of the device keys (common.port, common.baud)
+    were retired when the GPS moved in: one of them reaching two tools is
+    how the overlay once opened the OBD adapter. They refuse rather than
+    being skipped, because a silently ignored key reads as "this setting
+    doesn't work" — and an old config would start with no port at all.
+    The rename is one word, so the error hands it over."""
+    renames = []
+    for tool in TOOLS:
+        try:
+            _, _, scoped = _tool_surface(tool)
+        except (Exception, SystemExit):
+            continue
+        for name, dest in scoped.items():
+            if dest == key and name not in renames:
+                renames.append(name)
+    fix = " or ".join(f"common.{n}" for n in renames)
+    sys.exit(f"config error ({path}): common.{key} is not a key: name "
+             f"the device — {fix or 'use the device-scoped spelling'}")
+
+
 def _some_tool_recognizes(key, running_tool, path):
     """A common key this tool doesn't use is fine — if some tool does.
     Nobody recognizing it is the silent-typo case, and 'silent' is the
-    part this layer exists to kill. Lazy on purpose: a key of the running
-    tool's own matches directly and costs nothing; only a stranger key —
-    or a bare device key this tool skipped because it names the other
-    device — makes us go ask the neighbours."""
+    part this layer exists to kill. Every neighbour is asked before the
+    key is tolerated, because one of them may know it as a DEVICE option
+    — and a bare device key in "common" refuses no matter which tool is
+    running, so the config gets fixed once, not per tool."""
     unreachable = []
     everyone = set()
+    recognized = False
     for other in TOOLS:
         if other == running_tool:
             continue
@@ -538,14 +521,20 @@ def _some_tool_recognizes(key, running_tool, path):
         except (Exception, SystemExit) as e:
             unreachable.append(f"{other} ({e})")
             continue
-        if key in settings or key in other_scoped:
+        if key in other_scoped:
             return
         if key in verbs:
             sys.exit(f"config error ({path}): common.{key} — "
                      f"--{key.replace('_', '-')} is an action you take, "
                      "not a setting; pass it on the run that needs it")
+        if any(dest == key for dest in other_scoped.values()):
+            _refuse_bare_device_key(key, path)
+        if key in settings:
+            recognized = True
         everyone.update(settings)
         everyone.update(other_scoped)
+    if recognized:
+        return
     if unreachable:
         sys.exit(f"config error ({path}): common.{key} is not a setting of "
                  f"any tool that could be checked, and these could not be: "

@@ -80,16 +80,16 @@ def refuses(name, builder, tool, cfg, argv=(), saying=()):
 
 print("precedence:")
 
-args = parse(obd_feed.build_parser, "obd_feed", {"common": {"port": "COM9"}})
+args = parse(obd_feed.build_parser, "obd_feed", {"common": {"obd_port": "COM9"}})
 ok("file beats built-in default", args.port == "COM9", f"port={args.port!r}")
 ok("untouched options keep their defaults", args.baud == 115200)
 
 args = parse(obd_feed.build_parser, "obd_feed",
-             {"common": {"port": "COM9"}}, argv=["--port", "COM1"])
+             {"common": {"obd_port": "COM9"}}, argv=["--port", "COM1"])
 ok("command line beats file", args.port == "COM1", f"port={args.port!r}")
 
 args = parse(obd_feed.build_parser, "obd_feed",
-             {"common": {"baud": 115200}, "obd_feed": {"baud": 500000}})
+             {"common": {"obd_baud": 115200}, "obd_feed": {"baud": 500000}})
 ok("tool section beats common", args.baud == 500000, f"baud={args.baud!r}")
 
 args = parse(obd_probe.build_parser, "obd_probe",
@@ -110,7 +110,7 @@ ok("common key for a different tool is left for it",
 print("mutual exclusion:")
 
 args = parse(obd_feed.build_parser, "obd_feed",
-             {"common": {"port": "COM3"}}, argv=["--replay", "d.csv"])
+             {"common": {"obd_port": "COM3"}}, argv=["--replay", "d.csv"])
 ok("configured port yields to --replay on the CLI",
    args.replay == "d.csv" and args.port is None,
    f"port={args.port!r} replay={args.replay!r}")
@@ -126,21 +126,45 @@ print("device scope:")
 
 # The cross-wire this section exists to keep dead: common.port is the OBD
 # adapter, gps_overlay's --port is the XGPS160, and the overlay must not
-# inherit the adapter just because both options are spelled "port".
-# (stderr captured: the note it prints is itself under test further down.)
-with contextlib.redirect_stderr(io.StringIO()):
-    args = parse(gps_overlay.build_parser, "gps_overlay",
-                 {"common": {"port": "COM3"}})
-ok("common.port does not reach gps_overlay",
-   args.port is None, f"port={args.port!r}")
+# inherit the adapter just because both options are spelled "port". Since
+# 2026-08-19 the bare spellings aren't keys at all (Kris's call: fix the
+# config, don't accommodate it) — a config that says common.port refuses
+# at load and names the rename, whichever tool meets it. Silently ignoring
+# it would be the wrong-side failure: an old config quietly starting with
+# no port at all.
+refuses("common.port is not a key — it refuses and names the rename",
+        obd_probe.build_parser, "obd_probe",
+        {"common": {"port": "COM3"}},
+        saying=["common.port", "not a key", "common.obd_port"])
 
-args = parse(gps_overlay.build_parser, "gps_overlay",
-             {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}})
-ok("...its own section still names its own device",
-   args.port == "COM7", f"port={args.port!r}")
+refuses("common.baud refuses the same way",
+        obd_probe.build_parser, "obd_probe",
+        {"common": {"baud": 230400}},
+        saying=["common.baud", "not a key", "common.obd_baud"])
+
+refuses("the refusal doesn't care which device's tool is running",
+        gps_overlay.build_parser, "gps_overlay",
+        {"common": {"port": "COM3"}},
+        saying=["common.port", "not a key", "common.obd_port"])
+
+refuses("...or that the tool's own section already has a port",
+        gps_overlay.build_parser, "gps_overlay",
+        {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}},
+        saying=["common.port", "not a key"])
+
+refuses("...or that a configured replay would have made it moot",
+        gps_overlay.build_parser, "gps_overlay",
+        {"common": {"port": "COM3"},
+         "gps_overlay": {"replay": "runs/gps-last.txt"}},
+        saying=["common.port", "not a key"])
+
+refuses("...or that the running tool has no port option at all",
+        learn_gears.build_parser, "learn_gears",
+        {"common": {"port": "COM3"}}, argv=["drive.csv"],
+        saying=["common.port", "not a key", "common.obd_port"])
 
 args = parse(gps_overlay.build_parser, "gps_overlay", {})
-ok("...and an empty config invents nothing", args.port is None)
+ok("an empty config invents nothing", args.port is None)
 
 args = parse(obd_feed.build_parser, "obd_feed",
              {"common": {"obd_port": "COM3", "gps_port": "COM5"}})
@@ -157,11 +181,13 @@ args = parse(obd_probe.build_parser, "obd_probe",
 ok("common.obd_baud is the adapter baud's full name", args.baud == 230400,
    f"baud={args.baud!r}")
 
-args = parse(obd_probe.build_parser, "obd_probe",
-             {"common": {"port": "COM3", "baud": 230400}})
-ok("bare common.port/baud still mean the adapter (a pre-GPS file keeps working)",
-   args.port == "COM3" and args.baud == 230400,
-   f"port={args.port!r} baud={args.baud!r}")
+# Flipped 2026-08-19 (was: "bare common.port/baud still mean the adapter —
+# a pre-GPS file keeps working"). A pre-GPS file now gets a two-second
+# rename instead of a grandfather clause.
+refuses("a pre-GPS file refuses with the rename, not a grandfather clause",
+        obd_probe.build_parser, "obd_probe",
+        {"common": {"port": "COM3", "baud": 230400}},
+        saying=["common.port", "not a key", "common.obd_port"])
 
 args = parse(gps_overlay.build_parser, "gps_overlay",
              {"common": {"gps_port": "COM5"}}, argv=["--port", "COM9"])
@@ -174,39 +200,45 @@ ok("a scoped port still yields to --replay on the CLI",
    args.replay == "cap.txt" and args.port is None,
    f"port={args.port!r} replay={args.replay!r}")
 
-refuses("bare and scoped spellings of one setting can't both be set",
+refuses("bare and scoped spellings together refuse on the bare one",
         obd_feed.build_parser, "obd_feed",
         {"common": {"port": "COM3", "obd_port": "COM4"}},
-        saying=["common.port", "common.obd_port"])
+        saying=["common.port", "not a key", "common.obd_port"])
 
 refuses("a scoped name inside a tool's own section is refused",
         gps_overlay.build_parser, "gps_overlay",
         {"gps_overlay": {"gps_port": "COM5"}},
         saying=["gps_port", "already names the tool", "'port'"])
 
-# The one rig whose behavior changes — a common.port and no GPS port from
-# anywhere — is told why, on the run where it matters and only there.
-_err = io.StringIO()
-with contextlib.redirect_stderr(_err):
-    parse(gps_overlay.build_parser, "gps_overlay", {"common": {"port": "COM3"}})
-ok("the run that would have cross-wired gets a note naming gps_port",
-   "gps_port" in _err.getvalue(), f"stderr={_err.getvalue()!r}")
-
-_err = io.StringIO()
-with contextlib.redirect_stderr(_err):
-    parse(gps_overlay.build_parser, "gps_overlay",
-          {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}})
-ok("...and a rig with its GPS port written down hears nothing",
-   _err.getvalue() == "", f"stderr={_err.getvalue()!r}")
+# The controls that must stay green: a fully named rig works, quietly.
+args = parse(gps_overlay.build_parser, "gps_overlay",
+             {"common": {"gps_port": "COM5"}, "gps_overlay": {"port": "COM7"}})
+ok("a tool's own section still beats the scoped common key",
+   args.port == "COM7", f"port={args.port!r}")
 
 _err = io.StringIO()
 with contextlib.redirect_stderr(_err):
     args = parse(gps_overlay.build_parser, "gps_overlay",
-                 {"common": {"port": "COM3"},
-                  "gps_overlay": {"replay": "runs/gps-last.txt"}})
-ok("...and a configured replay rig hears nothing (the port is moot)",
-   _err.getvalue() == "" and args.replay == "runs/gps-last.txt",
-   f"stderr={_err.getvalue()!r} replay={args.replay!r}")
+                 {"common": {"obd_port": "COM3", "gps_port": "COM5"}})
+ok("a fully named rig hears nothing on stderr (the note machinery is gone)",
+   _err.getvalue() == "" and args.port == "COM5",
+   f"stderr={_err.getvalue()!r} port={args.port!r}")
+
+# config.example.json is the rig this repo is actually for — run the real
+# file through the real parsers, so the example can't drift from the layer.
+with open(os.path.join(HERE, "config.example.json"), encoding="utf-8") as f:
+    _example = json.load(f)
+args = parse(obd_feed.build_parser, "obd_feed", _example)
+ok("config.example.json: the feed reads the adapter",
+   args.port == "COM3" and args.baud == 115200,
+   f"port={args.port!r} baud={args.baud!r}")
+args = parse(obd_probe.build_parser, "obd_probe", _example)
+ok("config.example.json: the probe reads the adapter too",
+   args.port == "COM3" and args.baud == 115200,
+   f"port={args.port!r} baud={args.baud!r}")
+args = parse(gps_overlay.build_parser, "gps_overlay", _example)
+ok("config.example.json: the overlay reads the XGPS160, no crosstalk",
+   args.port == "COM5", f"port={args.port!r}")
 
 # --- everything unrecognized speaks ---------------------------------------------
 
@@ -273,7 +305,7 @@ else:
 
 try:
     parse_with_config(obd_probe.build_parser(), "obd_probe",
-                      argv=["--conf", cfg_file({"common": {"port": "COM9"}})])
+                      argv=["--conf", cfg_file({"common": {"obd_port": "COM9"}})])
     ok("abbreviated options are refused outright", False,
        "parsed against the wrong defaults")
 except SystemExit:
@@ -305,7 +337,7 @@ refuses("null is refused with the fix named",
 
 refuses("a list where a value belongs",
         obd_feed.build_parser, "obd_feed",
-        {"common": {"port": ["COM3"]}}, saying=["port", "list"])
+        {"common": {"obd_port": ["COM3"]}}, saying=["obd_port", "list"])
 
 refuses("an object where a value belongs",
         obd_probe.build_parser, "obd_probe",
@@ -321,7 +353,7 @@ refuses("a float on an int option",
 
 refuses("a bare number on a text option says quote it",
         obd_feed.build_parser, "obd_feed",
-        {"common": {"port": 3}}, saying=["port", "quote it"])
+        {"common": {"obd_port": 3}}, saying=["obd_port", "quote it"])
 
 args = parse(obd_feed.build_parser, "obd_feed", {"obd_feed": {"dwell": 2}})
 ok("an int lands on a float option", args.dwell == 2, f"dwell={args.dwell!r}")
@@ -354,7 +386,7 @@ print("encodings and shapes:")
 
 _p = cfg_file("")  # placeholder to get a path; rewrite it as UTF-16
 with open(_p, "w", encoding="utf-16") as f:
-    f.write('{"common": {"port": "COM3"}}')
+    f.write('{"common": {"obd_port": "COM3"}}')
 try:
     parse_with_config(obd_feed.build_parser(), "obd_feed", argv=["--config", _p])
     ok("UTF-16 config refuses in plain words", False, "parsed happily")
@@ -364,15 +396,15 @@ except SystemExit as e:
 
 _p = cfg_file("")
 with open(_p, "w", encoding="utf-8-sig") as f:
-    f.write('{"common": {"port": "COM3"}}')
+    f.write('{"common": {"obd_port": "COM3"}}')
 args = parse_with_config(obd_feed.build_parser(), "obd_feed",
                          argv=["--config", _p])
 ok("UTF-8 with BOM (what Notepad writes) just works", args.port == "COM3")
 
 refuses("duplicate keys are refused, not last-wins",
         obd_feed.build_parser, "obd_feed",
-        '{"common": {"port": "COM3", "port": "COM4"}}',
-        saying=["duplicate", "port"])
+        '{"common": {"obd_port": "COM3", "obd_port": "COM4"}}',
+        saying=["duplicate", "obd_port"])
 
 refuses("NaN is refused (a NaN dwell would freeze the gear readout silently)",
         obd_feed.build_parser, "obd_feed",

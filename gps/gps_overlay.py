@@ -557,9 +557,9 @@ def build_parser():
     ap = argparse.ArgumentParser(
         description="GPS live overlay server (XGPS160 -> browser / OBS).")
     src = ap.add_mutually_exclusive_group()
-    # .device: this port is the XGPS160, not the OBD adapter — the mark is
-    # what keeps a bare common.port (the adapter's) from reaching this
-    # tool. Its spelling in "common" is gps_port.
+    # .device: this port is the XGPS160, not the OBD adapter — the mark
+    # gives it its "common" spelling, gps_port. (Bare common.port is not
+    # a key; the config layer refuses it at load and names the rename.)
     src.add_argument("--port",
                      help="COM port or /dev/cu.* path (outgoing XGPS)"
                      ).device = "gps"

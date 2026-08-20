@@ -2,7 +2,7 @@
   "common": {
     "obd_port": "COM3",
     "gps_port": "COM5",
-    "baud": 115200
+    "obd_baud": 115200
   },
   "obd_feed": {
     "dash_gear": "hold"
