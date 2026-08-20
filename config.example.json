@@ -1,6 +1,7 @@
 {
   "common": {
-    "port": "COM3",
+    "obd_port": "COM3",
+    "gps_port": "COM5",
     "baud": 115200
   },
   "obd_feed": {

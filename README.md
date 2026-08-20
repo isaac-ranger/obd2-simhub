@@ -11,8 +11,8 @@ Two legs, two devices, one repo:
   in Chrome or an OBS browser source — no SimHub anywhere in the path.
 
 SimHub is one consumer of the car; the overlay is another. The name on the
-door still says the first leg only; the contents stopped agreeing with it a
-while ago, and this README is written for what's actually inside.
+door says so now — realcar-overlays — and this README is written for what's
+actually inside.
 
 ```
  ┌─────────┐  Bluetooth SPP   ┌──────────────────┐   UDP (binary feed)   ┌────────┐
@@ -45,11 +45,12 @@ a path from *I have the hardware* to *I know it works*. Each leg has one.
 
 The legs are separate processes and share nothing at runtime; what they
 share is the two-COM-ports-pick-the-outgoing-one ritual and a project that
-wants both on the same screen. They share `config.json` only halfway: the
-overlay reads it, and its port goes under `gps_overlay`, not `common` —
-`common.port` is the adapter, and an overlay that inherits it opens the
-OBDLink; the capture tool takes its port on the command line and reads no
-config at all. Everything from *What you need* down is the OBD2 ladder,
+wants both on the same screen. They share `config.json` too, and the shared
+`common` block tells the devices apart by name: `common.obd_port` is the
+adapter, `common.gps_port` is the XGPS160, and neither tool can inherit the
+other's hardware (the capture tool takes its port on the command line and
+reads no config at all). Everything from *What you need* down is the OBD2
+ladder,
 with a GPS line added where the two legs touch; the GPS leg's own
 lab-notebook lives in [`gps/README.md`](gps/README.md), numbers and all.
 
@@ -115,17 +116,23 @@ copy config.example.json config.json
 
 ```json
 {
-  "common": { "port": "COM3" }
+  "common": { "obd_port": "COM3", "gps_port": "COM5" }
 }
 ```
 
-From then on `py extractor\obd_feed.py` alone is a complete command. The
-rules, all five of them:
+From then on `py extractor\obd_feed.py` alone is a complete command — and
+so is `py gps\gps_overlay.py`. The rules, all five of them:
 
-* **`common`** holds values shared by more than one tool (the port, the
-  baud). A section named after a tool (`obd_feed`, `obd_probe`,
-  `learn_gears`, `learn_throttle`, `gps_overlay`, `fake_car`,
-  `supervisor`, `report`) applies to that tool only, and beats `common`.
+* **`common`** holds values shared by more than one tool. A value that
+  names a physical device wears the device's name — `obd_port` and
+  `obd_baud` are the adapter, `gps_port` is the XGPS160 — because
+  `obd_feed` and `gps_overlay` both call their option `--port` and mean
+  different hardware. (Bare `port`/`baud` still work and still mean the
+  adapter, exactly as they did before the GPS leg existed.) A section
+  named after a tool (`obd_feed`, `obd_probe`, `learn_gears`,
+  `learn_throttle`, `gps_overlay`, `fake_car`, `supervisor`, `report`)
+  applies to that tool only and beats `common`; it also scopes itself, so
+  inside `gps_overlay` the key is plain `port`.
 * **The command line beats the file.** `--port COM7` on a config that says
   `COM3` means `COM7`, today only. (To keep that promise airtight, option
   abbreviations are off — spell `--port` out, `--po` is refused.)
@@ -451,9 +458,10 @@ py supervisor\supervisor.py --gps -- --port COM3      (both legs, one window)
 
 Everything after `--` is passed to `obd_feed.py` untouched, so every flag the
 feed has works here unchanged. `--gps` adds `gps_overlay.py` as a second
-child; it reads its own port from `config.json`'s `gps_overlay` section, the
-same way it does when you run it by hand, so on a rig that has written its
-ports down once, `--gps` is the whole instruction. Anything that must ride
+child; it reads its own port from `config.json` — `common.gps_port`, or the
+`gps_overlay` section — the same way it does when you run it by hand, so on
+a rig that has written its ports down once, `--gps` is the whole
+instruction. Anything that must ride
 the command line instead goes in one quoted string:
 `--gps-args "--replay runs\gps-last.txt"`. (Split on spaces, no quoting
 inside — a Windows path with a backslash has to survive, and anything
@@ -607,7 +615,7 @@ gps/           gps_capture.py   the GPS leg: listening post (timestamped NMEA)
                README.md        the leg's own notes, with the measured numbers
 simdef/        the SimHub contract
 calibration.json                your car: gears, tires, tank, throttle, units
-config.example.json             copy to config.json: your rig (port, baud)
+config.example.json             copy to config.json: your rig (ports, baud)
 obd_config.py                   the config layer every tool loads
 report.py                       post-drive analysis
 docs/          DEVELOPMENT-NOTES.md

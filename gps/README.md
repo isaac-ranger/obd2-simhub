@@ -303,12 +303,14 @@ turn the line off, also on purpose — a config knob is a place for the
 supervisor to lose its signal.
 
 `config.json` (overlay only — capture has no argparse, so it has no
-config section):
+config section). The XGPS port can live in the shared `common` block
+under its device's name, `gps_port`, next to the adapter's `obd_port` —
+or in the overlay's own section as plain `port`:
 
 ```
 {
+  "common": { "gps_port": "COM5" },
   "gps_overlay": {
-    "port": "COM5",
     "http_port": 8765,
     "run_log": "tail",
     "log_dir": "runs"
@@ -316,8 +318,8 @@ config section):
 }
 ```
 
-The GPS is not the OBDLink. Put the XGPS port in `gps_overlay`, not in
-`common`, or the overlay will open the adapter.
+The GPS is not the OBDLink, and the config layer knows it: a bare
+`common.port` is the adapter's and never reaches the overlay.
 
 ## Tests
 
