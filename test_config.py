@@ -8,6 +8,8 @@ speaks. Stdlib only, no car, no adapter; parsers are the real tools'
 own build_parser() output, because a config layer tested against toy
 parsers would only prove it works on toys.
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -117,6 +119,85 @@ refuses("port AND replay in one file is refused",
         obd_feed.build_parser, "obd_feed",
         {"obd_feed": {"port": "COM3", "replay": "d.csv"}},
         saying=["mutually exclusive"])
+
+# --- a shared layer must not hand one device's port to another ------------------
+
+print("device scope:")
+
+# The cross-wire this section exists to keep dead: common.port is the OBD
+# adapter, gps_overlay's --port is the XGPS160, and the overlay must not
+# inherit the adapter just because both options are spelled "port".
+# (stderr captured: the note it prints is itself under test further down.)
+with contextlib.redirect_stderr(io.StringIO()):
+    args = parse(gps_overlay.build_parser, "gps_overlay",
+                 {"common": {"port": "COM3"}})
+ok("common.port does not reach gps_overlay",
+   args.port is None, f"port={args.port!r}")
+
+args = parse(gps_overlay.build_parser, "gps_overlay",
+             {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}})
+ok("...its own section still names its own device",
+   args.port == "COM7", f"port={args.port!r}")
+
+args = parse(gps_overlay.build_parser, "gps_overlay", {})
+ok("...and an empty config invents nothing", args.port is None)
+
+args = parse(obd_feed.build_parser, "obd_feed",
+             {"common": {"obd_port": "COM3", "gps_port": "COM5"}})
+ok("common.obd_port reaches the feed; common.gps_port passes it by",
+   args.port == "COM3", f"port={args.port!r}")
+
+args = parse(gps_overlay.build_parser, "gps_overlay",
+             {"common": {"obd_port": "COM3", "gps_port": "COM5"}})
+ok("common.gps_port reaches the overlay; common.obd_port passes it by",
+   args.port == "COM5", f"port={args.port!r}")
+
+args = parse(obd_probe.build_parser, "obd_probe",
+             {"common": {"obd_baud": 230400}})
+ok("common.obd_baud is the adapter baud's full name", args.baud == 230400,
+   f"baud={args.baud!r}")
+
+args = parse(obd_probe.build_parser, "obd_probe",
+             {"common": {"port": "COM3", "baud": 230400}})
+ok("bare common.port/baud still mean the adapter (a pre-GPS file keeps working)",
+   args.port == "COM3" and args.baud == 230400,
+   f"port={args.port!r} baud={args.baud!r}")
+
+args = parse(gps_overlay.build_parser, "gps_overlay",
+             {"common": {"gps_port": "COM5"}}, argv=["--port", "COM9"])
+ok("the command line still beats a scoped key", args.port == "COM9",
+   f"port={args.port!r}")
+
+args = parse(gps_overlay.build_parser, "gps_overlay",
+             {"common": {"gps_port": "COM5"}}, argv=["--replay", "cap.txt"])
+ok("a scoped port still yields to --replay on the CLI",
+   args.replay == "cap.txt" and args.port is None,
+   f"port={args.port!r} replay={args.replay!r}")
+
+refuses("bare and scoped spellings of one setting can't both be set",
+        obd_feed.build_parser, "obd_feed",
+        {"common": {"port": "COM3", "obd_port": "COM4"}},
+        saying=["common.port", "common.obd_port"])
+
+refuses("a scoped name inside a tool's own section is refused",
+        gps_overlay.build_parser, "gps_overlay",
+        {"gps_overlay": {"gps_port": "COM5"}},
+        saying=["gps_port", "port"])
+
+# The one rig whose behavior changes — a common.port and no GPS port from
+# anywhere — is told why, on the run where it matters and only there.
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    parse(gps_overlay.build_parser, "gps_overlay", {"common": {"port": "COM3"}})
+ok("the run that would have cross-wired gets a note naming gps_port",
+   "gps_port" in _err.getvalue(), f"stderr={_err.getvalue()!r}")
+
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    parse(gps_overlay.build_parser, "gps_overlay",
+          {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}})
+ok("...and a rig with its GPS port written down hears nothing",
+   _err.getvalue() == "", f"stderr={_err.getvalue()!r}")
 
 # --- everything unrecognized speaks ---------------------------------------------
 
@@ -292,8 +373,6 @@ refuses("NaN is refused (a NaN dwell would freeze the gear readout silently)",
 
 print("help:")
 
-import io
-import contextlib
 _help_out = io.StringIO()
 try:
     with contextlib.redirect_stdout(_help_out):
@@ -372,7 +451,7 @@ print("registry:")
 
 for tool in obd_config.TOOLS:
     try:
-        settings, verbs = obd_config._tool_surface(tool)
+        settings, verbs, scoped = obd_config._tool_surface(tool)
         ok(f"{tool} answers for its keys", bool(settings),
            "" if settings else "no configurable options?")
     except Exception as e:
@@ -383,6 +462,14 @@ ok("the verbs are marked where they live",
    and obd_config._tool_surface("learn_gears")[1] == {"write"}
    and obd_config._tool_surface("obd_probe")[1] == {"list_ports"}
    and obd_config._tool_surface("gps_overlay")[1] == {"list_ports"})
+
+ok("the device marks are too",
+   obd_config._tool_surface("obd_feed")[2] == {"obd_port": "port",
+                                               "obd_baud": "baud"}
+   and obd_config._tool_surface("obd_probe")[2] == {"obd_port": "port",
+                                                    "obd_baud": "baud"}
+   and obd_config._tool_surface("gps_overlay")[2] == {"gps_port": "port"}
+   and obd_config._tool_surface("supervisor")[2] == {})
 
 
 print()

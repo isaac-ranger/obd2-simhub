@@ -527,8 +527,10 @@ def run_probe(elm, report, args):
 
 def build_parser():
     ap = argparse.ArgumentParser(description="OBD2 adapter/vehicle probe (phase 1 of OBD2->SimHub)")
-    ap.add_argument("--port", help="COM port (COM5), device (/dev/rfcomm0), or socket://host:port")
-    ap.add_argument("--baud", type=int, default=115200, help="baud rate (ignored by Bluetooth SPP)")
+    # .device: the OBD adapter's — common.obd_port / common.obd_baud
+    # (see obd_feed.build_parser).
+    ap.add_argument("--port", help="COM port (COM5), device (/dev/rfcomm0), or socket://host:port").device = "obd"
+    ap.add_argument("--baud", type=int, default=115200, help="baud rate (ignored by Bluetooth SPP)").device = "obd"
     ap.add_argument("--seconds", type=float, default=5.0, help="duration of each rate test")
     ap.add_argument("--json", metavar="FILE", help="also write machine-readable results")
     ap.add_argument("--log", metavar="FILE.csv",

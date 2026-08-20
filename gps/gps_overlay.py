@@ -557,8 +557,12 @@ def build_parser():
     ap = argparse.ArgumentParser(
         description="GPS live overlay server (XGPS160 -> browser / OBS).")
     src = ap.add_mutually_exclusive_group()
+    # .device: this port is the XGPS160, not the OBD adapter — the mark is
+    # what keeps a bare common.port (the adapter's) from reaching this
+    # tool. Its spelling in "common" is gps_port.
     src.add_argument("--port",
-                     help="COM port or /dev/cu.* path (outgoing XGPS)")
+                     help="COM port or /dev/cu.* path (outgoing XGPS)"
+                     ).device = "gps"
     src.add_argument("--replay", metavar="CAPTURE.txt",
                      help="replay a gps_capture timestamped log instead of live")
     ap.add_argument("--http-host", default="127.0.0.1",

@@ -924,13 +924,17 @@ def build_parser():
     ap = argparse.ArgumentParser(
         description="OBD2 -> SimHub UDP telemetry feed (phase 2)")
     src = ap.add_mutually_exclusive_group()
+    # .device: port and baud name the OBD adapter, so their spelling in
+    # config.json's "common" is obd_port / obd_baud (bare port/baud still
+    # mean the adapter too — they predate the GPS leg).
     src.add_argument("--port",
-                     help="COM port (COM3), device, or socket://host:port")
+                     help="COM port (COM3), device, or socket://host:port"
+                     ).device = "obd"
     src.add_argument("--replay", metavar="DRIVE.csv",
                      help="feed from a recorded drive log instead of a car")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="replay pace multiplier (default 1.0 = real time)")
-    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--baud", type=int, default=115200).device = "obd"
     ap.add_argument("--udp", metavar="HOST:PORT",
                     help="feed target (default from feed_layout.json)")
     ap.add_argument("--calibration", default=repo_path("calibration.json"))
