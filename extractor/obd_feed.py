@@ -925,8 +925,9 @@ def build_parser():
         description="OBD2 -> SimHub UDP telemetry feed (phase 2)")
     src = ap.add_mutually_exclusive_group()
     # .device: port and baud name the OBD adapter, so their spelling in
-    # config.json's "common" is obd_port / obd_baud (bare port/baud still
-    # mean the adapter too — they predate the GPS leg).
+    # config.json's "common" is obd_port / obd_baud. (Bare common.port /
+    # common.baud are not keys; the config layer refuses them at load
+    # and names the rename.)
     src.add_argument("--port",
                      help="COM port (COM3), device, or socket://host:port"
                      ).device = "obd"
