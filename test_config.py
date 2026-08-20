@@ -118,7 +118,7 @@ ok("configured port yields to --replay on the CLI",
 refuses("port AND replay in one file is refused",
         obd_feed.build_parser, "obd_feed",
         {"obd_feed": {"port": "COM3", "replay": "d.csv"}},
-        saying=["mutually exclusive"])
+        saying=["obd_feed.port and obd_feed.replay", "mutually exclusive"])
 
 # --- a shared layer must not hand one device's port to another ------------------
 
@@ -182,7 +182,7 @@ refuses("bare and scoped spellings of one setting can't both be set",
 refuses("a scoped name inside a tool's own section is refused",
         gps_overlay.build_parser, "gps_overlay",
         {"gps_overlay": {"gps_port": "COM5"}},
-        saying=["gps_port", "port"])
+        saying=["gps_port", "already names the tool", "'port'"])
 
 # The one rig whose behavior changes — a common.port and no GPS port from
 # anywhere — is told why, on the run where it matters and only there.
@@ -198,6 +198,15 @@ with contextlib.redirect_stderr(_err):
           {"common": {"port": "COM3"}, "gps_overlay": {"port": "COM7"}})
 ok("...and a rig with its GPS port written down hears nothing",
    _err.getvalue() == "", f"stderr={_err.getvalue()!r}")
+
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    args = parse(gps_overlay.build_parser, "gps_overlay",
+                 {"common": {"port": "COM3"},
+                  "gps_overlay": {"replay": "runs/gps-last.txt"}})
+ok("...and a configured replay rig hears nothing (the port is moot)",
+   _err.getvalue() == "" and args.replay == "runs/gps-last.txt",
+   f"stderr={_err.getvalue()!r} replay={args.replay!r}")
 
 # --- everything unrecognized speaks ---------------------------------------------
 

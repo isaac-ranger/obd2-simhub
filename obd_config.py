@@ -392,13 +392,16 @@ def _apply(parser, tool, cfg, path, argv):
     # marks existed, that rig silently opened the other device.)
     given = _cli_given(argv)
     for key, action in shadowed:
-        if action.dest in merged:
-            continue
         peers = [action]
         for g in _exclusive_groups(parser):
             if action in g._group_actions:
                 peers = g._group_actions
                 break
+        # Quiet if the option — or any exclusive-group peer that makes it
+        # moot (a configured replay) — got a value from the file or the
+        # command line.
+        if any(a.dest in merged for a in peers):
+            continue
         if any(s in given for a in peers for s in a.option_strings):
             continue
         print(f"config note ({path}): common.{key} means the "
