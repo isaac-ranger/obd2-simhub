@@ -318,8 +318,10 @@ or in the overlay's own section as plain `port`:
 }
 ```
 
-The GPS is not the OBDLink, and the config layer knows it: a bare
-`common.port` is the adapter's and never reaches the overlay.
+The GPS is not the OBDLink, and the config layer knows it: `common.port`
+is not a key at all — name the device (`common.obd_port`,
+`common.gps_port`) or the file refuses to start, with the rename in the
+error message.
 
 ## Tests
 

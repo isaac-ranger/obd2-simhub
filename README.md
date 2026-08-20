@@ -127,8 +127,10 @@ so is `py gps\gps_overlay.py`. The rules, all five of them:
   names a physical device wears the device's name — `obd_port` and
   `obd_baud` are the adapter, `gps_port` is the XGPS160 — because
   `obd_feed` and `gps_overlay` both call their option `--port` and mean
-  different hardware. (Bare `port`/`baud` still work and still mean the
-  adapter, exactly as they did before the GPS leg existed.) A section
+  different hardware. That is the only rule: bare `port`/`baud` are not
+  keys in `common`, and a file that says them refuses to start and names
+  the rename. (A config predating the GPS leg needs one edit — `port` →
+  `obd_port` — and the error message will tell you exactly that.) A section
   named after a tool (`obd_feed`, `obd_probe`, `learn_gears`,
   `learn_throttle`, `gps_overlay`, `fake_car`, `supervisor`, `report`)
   applies to that tool only and beats `common`; it also scopes itself, so
